@@ -352,6 +352,157 @@ func TestStream_PoolSlotReleasedOnEndAndCancel(t *testing.T) {
 	waitInFlightZero(t, p, time.Second)
 }
 
+// slowSource is a streaming provider double that emits chunks slowly (one per
+// perChunk) and records when its goroutine stops so a cancel/leak test can
+// assert the source goroutine terminated after a ctx cancellation.
+type slowSource struct {
+	perChunk time.Duration
+	n        int           // total chunks to emit (before the terminal Done)
+	stopped  chan struct{} // closed when the goroutine returns
+}
+
+func newSlowSource(perChunk time.Duration, n int) *slowSource {
+	return &slowSource{perChunk: perChunk, n: n, stopped: make(chan struct{})}
+}
+
+func (s *slowSource) Infer(context.Context, provider.Request) (provider.Response, error) {
+	return provider.Response{}, errors.New("unary not used in composed-chain cancel test")
+}
+
+func (s *slowSource) InferStream(ctx context.Context, _ provider.Request) (<-chan provider.Chunk, error) {
+	out := make(chan provider.Chunk)
+	go func() {
+		defer close(out)
+		defer close(s.stopped)
+		for i := 0; i < s.n; i++ {
+			tmr := time.NewTimer(s.perChunk)
+			select {
+			case <-ctx.Done():
+				tmr.Stop()
+				return
+			case <-tmr.C:
+			}
+			select {
+			case out <- provider.Chunk{Content: "x"}:
+			case <-ctx.Done():
+				return
+			}
+		}
+		select {
+		case out <- provider.Chunk{Done: true}:
+		case <-ctx.Done():
+		}
+	}()
+	return out, nil
+}
+
+// TestComposedChain_CancelMidStream_NoLeak covers the FULL composed stream
+// chain as shipped in cmd/gateway/main.go:
+//
+//	tracing.InstrumentStreamFunc(
+//	    metrics.InstrumentStreamFunc(
+//	        pool.GuardStream(
+//	            composer.StreamFunc()  ←  breaker.ExecuteStream(provider.InferStream)
+//	        )
+//	    )
+//	)
+//
+// It verifies that cancelling the context mid-stream (simulating a client
+// disconnect) causes:
+//  1. The pool slot is released (InFlight → 0, no slot leak).
+//  2. The source goroutine terminates (no goroutine leak).
+//  3. The OTel span is ended (span appears in SpanRecorder.Ended()).
+//  4. The provider metric is observed (histogram sample count ≥ 1).
+//
+// The test is designed to be -race clean: all shared state is mediated by
+// channels or atomics; it runs enough chunks to make a leak detectable.
+func TestComposedChain_CancelMidStream_NoLeak(t *testing.T) {
+	t.Parallel()
+
+	// --- wire observability ---
+	reg := prometheus.NewRegistry()
+	met := metrics.New(reg)
+
+	sr := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
+	tracer := tracing.NewWithProvider(tp, tp.Shutdown)
+
+	// --- wire pool (small limit so a leaked slot is immediately detectable) ---
+	const poolLimit = 2
+	p := pool.New(poolLimit, time.Second)
+
+	// --- wire breaker + composer ---
+	breakers := breaker.NewRegistry(config.Breaker{RetryAfter: 30 * time.Second},
+		breaker.WithSettings(tripImmediately))
+	composer := resilience.New(retry.New(config.Retry{}), breakers, 30*time.Second)
+
+	// --- source: many slow chunks so the stream is genuinely active when
+	//     cancelled after the first chunk is consumed ---
+	const nChunks = 50
+	src := newSlowSource(30*time.Millisecond, nChunks)
+
+	// Register the slow source as the provider for the "composed" model.
+	// The composed chain is invoked directly with `src` as the provider, which
+	// matches how the server calls composedStream(ctx, providerFromRouter, req).
+	router := proxy.NewRouter()
+	router.Register("composed", src)
+	_ = router // registered above for documentation; the StreamFunc receives src directly.
+
+	// --- compose the FULL chain exactly as main.go does ---
+	composedStream := tracer.InstrumentStreamFunc(
+		met.InstrumentStreamFunc(
+			p.GuardStream(
+				composer.StreamFunc(),
+			),
+		),
+	)
+
+	// --- start the stream ---
+	ctx, cancel := context.WithCancel(context.Background())
+	ch, err := composedStream(ctx, src, provider.Request{Model: "composed"})
+	if err != nil {
+		cancel()
+		t.Fatalf("composed chain failed to initiate stream: %v", err)
+	}
+
+	// Consume exactly one chunk so the stream is genuinely in-flight.
+	select {
+	case _, ok := <-ch:
+		if !ok {
+			cancel()
+			t.Fatal("stream closed before we could consume any chunk")
+		}
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for first chunk")
+	}
+
+	// Cancel the context and abandon the output channel — exactly what the server
+	// does on a client disconnect (the server stops reading and returns).
+	cancel()
+	// Do NOT drain ch here: we deliberately abandon it, as the server would.
+
+	// 1. Pool slot must drain to 0 (slot released by the pool's forwarding
+	//    goroutine once it drains the source to close).
+	waitInFlightZero(t, p, 3*time.Second)
+
+	// 2. Source goroutine must have stopped (no goroutine leak).
+	select {
+	case <-src.stopped:
+		// good: goroutine terminated.
+	case <-time.After(3 * time.Second):
+		t.Fatal("source goroutine did not stop after context cancel (goroutine leak)")
+	}
+
+	// 3. OTel span must be ended (the forwarding goroutine calls span.End() via
+	//    defer when it exits).
+	waitSpanRecorded(t, sr, "provider.stream", 3*time.Second)
+
+	// 4. Provider metric must be observed (the metrics forwarder observes the
+	//    duration on channel close via defer).
+	waitMetricObserved(t, reg, "provider_request_duration_seconds", "composed", 3*time.Second)
+}
+
 // --- helpers ---------------------------------------------------------------
 
 func waitInFlightZero(t *testing.T, p *pool.Pool, timeout time.Duration) {

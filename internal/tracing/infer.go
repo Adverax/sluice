@@ -61,6 +61,16 @@ func (p *Provider) InstrumentStreamFunc(next server.StreamFunc) server.StreamFun
 			return nil, err
 		}
 
+		// Contract guard: nil channel with nil error is a violated contract by an
+		// inner layer. Treat as a zero-length stream — end the span now and return
+		// a closed channel so no goroutine blocks forever on a nil channel.
+		if src == nil {
+			span.End()
+			out := make(chan provider.Chunk)
+			close(out)
+			return out, nil
+		}
+
 		out := make(chan provider.Chunk)
 		go func() {
 			defer close(out)

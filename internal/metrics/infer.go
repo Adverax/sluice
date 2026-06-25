@@ -51,6 +51,16 @@ func (m *Metrics) InstrumentStreamFunc(next server.StreamFunc) server.StreamFunc
 			return nil, err
 		}
 
+		// Contract guard: nil channel with nil error is a violated contract by an
+		// inner layer. Treat as a zero-length stream — observe the duration and
+		// return a closed channel so no goroutine blocks forever on a nil channel.
+		if src == nil {
+			m.ProviderRequestDuration.WithLabelValues(req.Model).Observe(time.Since(start).Seconds())
+			out := make(chan provider.Chunk)
+			close(out)
+			return out, nil
+		}
+
 		out := make(chan provider.Chunk)
 		go func() {
 			defer close(out)

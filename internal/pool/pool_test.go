@@ -296,3 +296,53 @@ func waitFor(t *testing.T, cond func() bool, timeout time.Duration) {
 	}
 	t.Fatalf("condition not met within %s", timeout)
 }
+
+// TestGuardStream_NilSourceChannel_SlotReleasedAndChannelClosed verifies the
+// defensive nil-channel guard (FIX 2): if the inner StreamFunc returns (nil,
+// nil) — a contract violation — GuardStream must NOT leak the slot and must
+// return a closed channel (zero-length stream) rather than spawning a goroutine
+// that blocks forever on a nil channel read.
+func TestGuardStream_NilSourceChannel_SlotReleasedAndChannelClosed(t *testing.T) {
+	t.Parallel()
+
+	const limit = 1
+	p := New(limit, time.Second)
+
+	// nilInner simulates a misbehaving inner layer that returns (nil, nil).
+	nilInner := func(context.Context, provider.Provider, provider.Request) (<-chan provider.Chunk, error) {
+		return nil, nil
+	}
+	guarded := p.GuardStream(nilInner)
+
+	// The call must succeed (no error) and return a non-nil channel.
+	out, err := guarded(context.Background(), nil, provider.Request{Model: "mock"})
+	if err != nil {
+		t.Fatalf("nil-source guard returned unexpected error: %v", err)
+	}
+	if out == nil {
+		t.Fatal("nil-source guard returned nil channel; want a closed channel")
+	}
+
+	// The channel must be closed immediately (zero-length stream).
+	select {
+	case _, ok := <-out:
+		if ok {
+			t.Fatal("channel sent a value; want it closed immediately")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("channel not closed after 100ms; possible goroutine block on nil channel")
+	}
+
+	// Slot must be released (InFlight back to 0) so subsequent streams are not
+	// refused (proves no leak).
+	waitFor(t, func() bool { return p.InFlight() == 0 }, time.Second)
+
+	// A subsequent stream must acquire the slot (would 503 if the slot leaked).
+	out2, err := guarded(context.Background(), nil, provider.Request{Model: "mock"})
+	if err != nil {
+		t.Fatalf("post-nil stream should acquire slot, got %v (slot leaked on nil source)", err)
+	}
+	for range out2 { // drain to close.
+	}
+	waitFor(t, func() bool { return p.InFlight() == 0 }, time.Second)
+}

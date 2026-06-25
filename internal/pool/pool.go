@@ -197,6 +197,17 @@ func (p *Pool) GuardStream(next server.StreamFunc) server.StreamFunc {
 			return nil, err
 		}
 
+		// Contract guard: a nil channel with a nil error is a violated contract by
+		// an inner layer. Treat it as an immediately-closed zero-length stream so
+		// the slot is released now and the caller gets a closed channel rather than
+		// a forwarding goroutine that blocks forever on a nil channel read.
+		if src == nil {
+			p.release()
+			out := make(chan provider.Chunk)
+			close(out)
+			return out, nil
+		}
+
 		// Initiation succeeded: hold the slot for the stream lifetime. A forwarding
 		// goroutine copies src → out and releases the slot exactly once when src is
 		// fully drained (closed). releaseOnce guards against any future double-call.
