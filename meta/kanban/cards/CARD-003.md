@@ -130,4 +130,47 @@ health/readiness logic under `internal/proxy/**.go`, `internal/server/**.go`, an
 
 ## Worktree notes
 
-—
+Implemented on branch `card/003-proxy-router-health-timeouts` (golang-pro).
+
+**Packages created**
+- `internal/proxy/` — `Router` registry mapping model→`provider.Provider` (FR-002);
+  `ErrModelNotRegistered` (→404). Ports-and-adapters seam; no concrete provider import.
+- `internal/server/` — implements the generated `api.StrictServerInterface` (ADR-0011).
+  `CreateChatCompletion` maps `api.ChatCompletionRequest`→`provider.Request`
+  (temperature float32→*float64, role enum, stream/max_tokens), routes by model, calls
+  the provider via a swappable `InferFunc` hook (ADR-0006 seam for FR-007 retry/breaker),
+  maps `provider.Response`→`api.ChatCompletionResponse`. `GetHealthz`/`GetReadyz`/`GetMetrics`
+  also implemented. `Server.Handler(mux)` wires `api.NewStrictHandler` + `api.HandlerFromMux`.
+
+**Packages changed**
+- `internal/health/` — added `Result` + `Evaluate(ctx)` (transport-agnostic readiness
+  verdict; `Handler.Ready` now delegates to it so the body matches the spec schema).
+  Added `checkers.go`: `NewRedisChecker` (go-redis Ping) + `NewPostgresChecker` (pgx Ping)
+  over narrow `RedisPinger`/`PostgresPinger` ports.
+- `cmd/gateway/main.go` — DI wiring: proxy.Router (Mock registered for "mock" until real
+  adapters land), reused tuned `http.Client` w/ explicit timeout (ADR-0010), real go-redis
+  client + pgx pool built from config DSNs with config timeouts (NFR-004), registered as
+  readiness checkers. Composition order (ADR-0006): logging → counting → generated routes.
+
+**Wiring the generated interface**: `server.Server` satisfies `api.StrictServerInterface`
+(compile-time assertion); all four routes registered via `api.HandlerFromMux` on a
+`*http.ServeMux` (CON-001, no framework). JSON decode + malformed-body→400 handled by the
+generated strict server (verified by test). Did not edit `api.gen.go`/`openapi.yaml`.
+
+**Deps added**: `github.com/redis/go-redis/v9`, `github.com/jackc/pgx/v5` (+ `go mod tidy`).
+Note: `go mod tidy` canonicalizes the go directive to `go 1.25.0` (semantically == 1.25).
+
+**AC→test mapping**
+- AC-001 `TestProxy_HappyPath_NonStreaming` · AC-003 `TestProxy_ProviderError_Returns502`
+- AC-004 `TestProxy_InvalidBody_Returns400` · AC-005 `TestRouter_RoutesToCorrectProvider`
+  (+ proxy-pkg `TestRouter_RoutesToCorrectProvider`, two providers)
+- AC-006 `TestRouter_MissingModel_Returns400` · AC-007 `TestRouter_UnknownModel_Returns404`
+  (400/404 assert provider spy NOT called)
+- AC-025 `TestHealthz_ReturnsOK` · AC-026 `TestReadyz_AllDepsUp_Returns200`
+- AC-027 `TestReadyz_RedisDown_Returns503` · AC-028 `TestReadyz_PostgresDown_Returns503`
+  (readyz tests use STUB checkers via health.Checker port — no containers)
+- AC-045 `TestConfig_AllBoundariesHaveTimeouts` (unchanged, green)
+- Real checker mapping unit-tested with fakes: `TestRedisChecker`, `TestPostgresChecker`.
+
+**Results**: `go build ./...` OK; `go test -race ./...` all green; `go generate ./...`
+diff-clean (no changes to internal/api or api/openapi.yaml).

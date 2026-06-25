@@ -68,17 +68,32 @@ func (h *Handler) Live(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// Ready handles GET /readyz: 200 when every registered checker is healthy, 503
-// when at least one reports an error (FR-009). With no checkers registered the
-// readiness framework still answers 200 (the dependency wiring lands in
-// CARD-003).
-func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
+// Result is the outcome of evaluating every registered checker. It is the
+// transport-agnostic readiness verdict: the HTTP boundary (the api-generated
+// /readyz handler in the server package, or Handler.Ready below) maps it to a
+// status code and a response body. Dependencies maps each dependency name to
+// "ok" or to the error description (e.g. "redis:down" -> reason).
+type Result struct {
+	// Healthy is true only when every registered checker reported nil.
+	Healthy bool
+	// Dependencies is the per-dependency status map: "ok" on success, the
+	// error string on failure. With no checkers registered it is empty and
+	// Healthy is true.
+	Dependencies map[string]string
+}
+
+// Evaluate runs every registered checker under the Handler's per-check timeout
+// (derived from the supplied ctx) and returns the aggregated Result (FR-009).
+// It is the single source of truth for readiness; both Handler.Ready and the
+// api-generated /readyz handler build their response from it, so the verdict is
+// consistent across wiring choices.
+func (h *Handler) Evaluate(ctx context.Context) Result {
 	h.mu.RLock()
 	checkers := make([]Checker, len(h.checkers))
 	copy(checkers, h.checkers)
 	h.mu.RUnlock()
 
-	ctx, cancel := context.WithTimeout(r.Context(), h.timeout)
+	ctx, cancel := context.WithTimeout(ctx, h.timeout)
 	defer cancel()
 
 	deps := make(map[string]string, len(checkers))
@@ -96,13 +111,23 @@ func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	return Result{Healthy: healthy, Dependencies: deps}
+}
+
+// Ready handles GET /readyz: 200 when every registered checker is healthy, 503
+// when at least one reports an error (FR-009). With no checkers registered the
+// readiness framework still answers 200 (the dependency wiring lands in
+// CARD-003).
+func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
+	res := h.Evaluate(r.Context())
+
 	status := http.StatusOK
 	overall := "ok"
-	if !healthy {
+	if !res.Healthy {
 		status = http.StatusServiceUnavailable
 		overall = "unavailable"
 	}
-	writeJSON(w, status, map[string]any{"status": overall, "dependencies": deps})
+	writeJSON(w, status, map[string]any{"status": overall, "dependencies": res.Dependencies})
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
