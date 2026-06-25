@@ -90,6 +90,59 @@ func TestConfig_ValidateRejectsZeroTimeout(t *testing.T) {
 	}
 }
 
+// TestConfig_Load_RejectsBadEnvTimeout covers NFR-004 (fail-loud): if a
+// duration env var is SET but malformed or <= 0, Load must return an error
+// rather than silently falling back to the default.
+func TestConfig_Load_RejectsBadEnvTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		key     string
+		value   string
+		wantErr bool
+	}{
+		{
+			name:    "malformed read timeout",
+			key:     "GATEWAY_READ_TIMEOUT",
+			value:   "garbage",
+			wantErr: true,
+		},
+		{
+			name:    "zero read timeout",
+			key:     "GATEWAY_READ_TIMEOUT",
+			value:   "0s",
+			wantErr: true,
+		},
+		{
+			name:    "negative write timeout",
+			key:     "GATEWAY_WRITE_TIMEOUT",
+			value:   "-5s",
+			wantErr: true,
+		},
+		{
+			name:    "malformed shutdown timeout",
+			key:     "GATEWAY_SHUTDOWN_TIMEOUT",
+			value:   "30x",
+			wantErr: true,
+		},
+		{
+			name:    "valid read timeout still loads",
+			key:     "GATEWAY_READ_TIMEOUT",
+			value:   "3s",
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(tt.key, tt.value)
+			_, err := Load()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Load() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestConfig_EnvOverride(t *testing.T) {
 	t.Setenv("GATEWAY_ADDR", ":9999")
 	t.Setenv("GATEWAY_READ_TIMEOUT", "7s")

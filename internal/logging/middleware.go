@@ -46,6 +46,15 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 	return r.ResponseWriter.Write(b)
 }
 
+// Flush implements http.Flusher so streaming responses (SSE, chunked) pass
+// through to the underlying ResponseWriter. Without this, wrapping the
+// ResponseWriter in statusRecorder would silently drop Flush calls.
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // Middleware returns an HTTP middleware that, on every completed request, emits
 // an slog record at INFO level carrying request_id, latency_ms and status_code
 // (FR-016 / AC-040). If the wrapped handler panics, the panic is logged at

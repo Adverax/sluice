@@ -47,9 +47,9 @@ func run() error {
 	// (Redis, Postgres) are registered in CARD-003.
 	healthHandler := health.New(logger, cfg.Redis.DialTimeout)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", healthHandler.Live)
-	mux.HandleFunc("GET /readyz", healthHandler.Ready)
+	// appMux holds application routes (proxy, etc.) that should be counted as
+	// in-flight for FR-012 / NFR-005.
+	appMux := http.NewServeMux()
 
 	server := &http.Server{
 		Addr:         cfg.Server.Addr,
@@ -60,9 +60,16 @@ func run() error {
 
 	manager := lifecycle.New(server, logger, cfg.Server.ShutdownTimeout)
 
-	// Middleware chain (outermost first): request logging then in-flight
-	// counting, both wrapping the application mux.
-	handler := logging.Middleware(logger)(manager.CountingMiddleware(mux))
+	// outerMux mounts probe routes directly (not counted) and routes all other
+	// traffic through the counting middleware so health-check probes do not
+	// inflate the "drained N" log line.
+	outerMux := http.NewServeMux()
+	outerMux.HandleFunc("GET /healthz", healthHandler.Live)
+	outerMux.HandleFunc("GET /readyz", healthHandler.Ready)
+	outerMux.Handle("/", manager.CountingMiddleware(appMux))
+
+	// Middleware chain (outermost first): request logging wrapping the outer mux.
+	handler := logging.Middleware(logger)(outerMux)
 	server.Handler = handler
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

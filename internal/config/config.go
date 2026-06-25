@@ -99,32 +99,49 @@ type Config struct {
 
 // Load reads the configuration from the environment, applies defaults for any
 // unset value, and validates it. It returns an error if any value is invalid.
+// If an env var is SET but malformed or <= 0, Load returns an error immediately
+// (NFR-004 fail-loud). Unset env vars silently use the default.
 func Load() (*Config, error) {
+	var errs []error
+
+	mustDuration := func(key string, fallback time.Duration) time.Duration {
+		d, err := getDuration(key, fallback)
+		if err != nil {
+			errs = append(errs, err)
+			return fallback
+		}
+		return d
+	}
+
 	cfg := &Config{
 		Server: Server{
 			Addr:            getString("GATEWAY_ADDR", defaultAddr),
-			ReadTimeout:     getDuration("GATEWAY_READ_TIMEOUT", defaultReadTimeout),
-			WriteTimeout:    getDuration("GATEWAY_WRITE_TIMEOUT", defaultWriteTimeout),
-			IdleTimeout:     getDuration("GATEWAY_IDLE_TIMEOUT", defaultIdleTimeout),
-			ShutdownTimeout: getDuration("GATEWAY_SHUTDOWN_TIMEOUT", defaultShutdownTimeout),
+			ReadTimeout:     mustDuration("GATEWAY_READ_TIMEOUT", defaultReadTimeout),
+			WriteTimeout:    mustDuration("GATEWAY_WRITE_TIMEOUT", defaultWriteTimeout),
+			IdleTimeout:     mustDuration("GATEWAY_IDLE_TIMEOUT", defaultIdleTimeout),
+			ShutdownTimeout: mustDuration("GATEWAY_SHUTDOWN_TIMEOUT", defaultShutdownTimeout),
 		},
 		Upstream: Upstream{
-			Timeout: getDuration("GATEWAY_UPSTREAM_TIMEOUT", defaultUpstreamTimeout),
+			Timeout: mustDuration("GATEWAY_UPSTREAM_TIMEOUT", defaultUpstreamTimeout),
 		},
 		Redis: Redis{
 			URL:         getString("GATEWAY_REDIS_URL", "redis://localhost:6379"),
-			DialTimeout: getDuration("GATEWAY_REDIS_DIAL_TIMEOUT", defaultRedisDialTimeout),
-			ReadTimeout: getDuration("GATEWAY_REDIS_READ_TIMEOUT", defaultRedisReadTimeout),
+			DialTimeout: mustDuration("GATEWAY_REDIS_DIAL_TIMEOUT", defaultRedisDialTimeout),
+			ReadTimeout: mustDuration("GATEWAY_REDIS_READ_TIMEOUT", defaultRedisReadTimeout),
 		},
 		Postgres: Postgres{
 			DSN:            getString("GATEWAY_DB_DSN", "postgres://app:app@localhost:5432/sluice?sslmode=disable"),
-			AcquireTimeout: getDuration("GATEWAY_DB_ACQUIRE_TIMEOUT", defaultPostgresAcquireTimeout),
+			AcquireTimeout: mustDuration("GATEWAY_DB_ACQUIRE_TIMEOUT", defaultPostgresAcquireTimeout),
 		},
 		Logging: Logging{
 			Level:  getString("GATEWAY_LOG_LEVEL", defaultLogLevel),
 			Format: getString("GATEWAY_LOG_FORMAT", defaultLogFormat),
 		},
 		WorkerPoolSize: getInt("GATEWAY_WORKER_POOL_SIZE", defaultWorkerPoolSize),
+	}
+
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("config: %w", errs[0])
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -181,16 +198,22 @@ func getString(key, fallback string) string {
 	return fallback
 }
 
-func getDuration(key string, fallback time.Duration) time.Duration {
+// getDuration returns (default, nil) when the env var is unset/empty.
+// It returns (default, error) when the var is set but malformed or <= 0,
+// so Load() can surface that as a hard failure (NFR-004 fail-loud).
+func getDuration(key string, fallback time.Duration) (time.Duration, error) {
 	v, ok := os.LookupEnv(key)
 	if !ok || v == "" {
-		return fallback
+		return fallback, nil
 	}
 	d, err := time.ParseDuration(v)
-	if err != nil || d <= 0 {
-		return fallback
+	if err != nil {
+		return fallback, fmt.Errorf("env %s=%q: %w", key, v, err)
 	}
-	return d
+	if d <= 0 {
+		return fallback, fmt.Errorf("env %s=%q: duration must be > 0", key, v)
+	}
+	return d, nil
 }
 
 func getInt(key string, fallback int) int {
