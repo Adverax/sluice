@@ -109,6 +109,20 @@ func (m *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key, minted := m.resolveKey(r)
 
+		// Fail CLOSED if the key minter returned an empty string (crypto/rand
+		// failure). An empty key must never reach the registry — it would create a
+		// shared anonymous bucket and allow all keyless clients to share one limit,
+		// effectively bypassing per-key enforcement (security).
+		if key == "" {
+			m.logger.LogAttrs(r.Context(), slog.LevelError,
+				"ephemeral key mint failed (crypto/rand error); rejecting request",
+			)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"internal_error","message":"failed to assign rate-limit key"}`))
+			return
+		}
+
 		// On a minted key, advertise it to the client BEFORE we might reject, so
 		// even a 429 carries the key the client should reuse (ADR-0001 / AC-012).
 		if minted {
@@ -149,23 +163,59 @@ func (m *RateLimiter) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// resolveKey extracts the API key from the Authorization header. When absent it
-// mints a crypto-random ephemeral key (ADR-0001) and reports minted=true so the
-// caller advertises it on the response.
+// resolveKey determines the API key for this request using a three-step
+// precedence (ADR-0001):
+//
+//  1. Authorization header present → use it (existing client-supplied key).
+//  2. No header but sluice_api_key cookie present AND well-formed (eph_ prefix
+//     + 32 hex chars) → reuse it so the bucket is not lost and the limit cannot
+//     be dodged by header-omission.
+//  3. Neither → mint a fresh crypto-random ephemeral key and report minted=true
+//     so the caller sets the header + cookie on the response.
 func (m *RateLimiter) resolveKey(r *http.Request) (key string, minted bool) {
 	auth := strings.TrimSpace(r.Header.Get("Authorization"))
-	if auth == "" {
-		return m.mintKey(), true
+	if auth != "" {
+		// Accept "Bearer <token>" and raw token forms; the token is an identifier
+		// only — it is NOT validated against any store (ADR-0001 non-goal).
+		if after, ok := strings.CutPrefix(auth, "Bearer "); ok {
+			auth = strings.TrimSpace(after)
+		}
+		if auth != "" {
+			return auth, false
+		}
 	}
-	// Accept "Bearer <token>" and raw token forms; the token is an identifier
-	// only — it is NOT validated against any store (ADR-0001 non-goal).
-	if after, ok := strings.CutPrefix(auth, "Bearer "); ok {
-		auth = strings.TrimSpace(after)
+
+	// No (usable) Authorization header — check for an already-issued ephemeral
+	// key in the cookie. A well-formed cookie reuses the existing bucket so the
+	// per-key limit cannot be bypassed by simply dropping the header.
+	if c, err := r.Cookie(apiKeyCookie); err == nil && isWellFormedEphemeralKey(c.Value) {
+		return c.Value, false
 	}
-	if auth == "" {
-		return m.mintKey(), true
+
+	// Neither header nor valid cookie: mint a fresh key.
+	return m.mintKey(), true
+}
+
+// isWellFormedEphemeralKey reports whether v looks like a key we issued:
+// the ephemeralKeyPrefix followed by exactly 32 lowercase hex characters
+// (16 random bytes hex-encoded).  This rejects empty strings, truncated
+// values, and values with the correct prefix but wrong alphabet/length that
+// could be attacker-crafted to collide with a real key or inflate the registry.
+func isWellFormedEphemeralKey(v string) bool {
+	const hexLen = 32 // 16 bytes × 2 hex digits
+	if !strings.HasPrefix(v, ephemeralKeyPrefix) {
+		return false
 	}
-	return auth, false
+	tail := v[len(ephemeralKeyPrefix):]
+	if len(tail) != hexLen {
+		return false
+	}
+	for _, ch := range tail {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 // reject writes a 429 with a Retry-After header and does NOT call next, so no
@@ -190,13 +240,13 @@ func (m *RateLimiter) reject(w http.ResponseWriter, r *http.Request, retryAfter 
 }
 
 // mintEphemeralKey returns a cryptographically random ephemeral key (ADR-0001,
-// security: crypto/rand, never math/rand). On the practically-impossible RNG
-// failure it falls back to a timestamp-derived value so a request is never left
-// without a key.
+// security: crypto/rand, never math/rand). On a crypto/rand failure it returns
+// an empty string; the caller MUST check for "" and fail the request (500)
+// rather than issuing a guessable or colliding key (fail-closed, security).
 func mintEphemeralKey() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return ephemeralKeyPrefix + strconv.FormatInt(time.Now().UnixNano(), 16)
+		return ""
 	}
 	return ephemeralKeyPrefix + hex.EncodeToString(b[:])
 }

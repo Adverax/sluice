@@ -67,6 +67,11 @@ const (
 	// defaultRateLimitWindow is the bucket window for the distributed counter: the
 	// global cap is interpreted as RPS over this window (1s) per ADR-0010.
 	defaultRateLimitWindow = time.Second
+	// defaultRateLimitMaxKeys is the hard cap on distinct API keys held in the
+	// local token-bucket registry. Exceeding this limit evicts the LRU entry
+	// (memory-exhaustion / DoS defence). 100 000 is generous for a single
+	// instance while remaining safe on a default-provisioned host.
+	defaultRateLimitMaxKeys = 100_000
 )
 
 // Server holds the timeouts applied to the inbound *http.Server boundary
@@ -164,6 +169,11 @@ type RateLimit struct {
 	// Window is the bucket window for the distributed counter. The global cap is
 	// RPS requests per Window across all gateway instances sharing one Redis.
 	Window time.Duration
+	// MaxKeys is the hard cap on the number of per-key limiters held in the
+	// local token-bucket registry (GATEWAY_RATELIMIT_MAX_KEYS). When the
+	// registry is at cap the least-recently-used entry is evicted before a new
+	// key is inserted (memory-exhaustion / DoS defence).
+	MaxKeys int
 }
 
 // Config is the fully-resolved service configuration.
@@ -267,9 +277,10 @@ func Load() (*Config, error) {
 			RetryAfter:   mustDuration("GATEWAY_BREAKER_RETRY_AFTER", defaultBreakerRetryAfter),
 		},
 		RateLimit: RateLimit{
-			RPS:    mustPositiveInt("GATEWAY_RATELIMIT_RPS", defaultRateLimitRPS),
-			Burst:  mustPositiveInt("GATEWAY_RATELIMIT_BURST", defaultRateLimitBurst),
-			Window: mustDuration("GATEWAY_RATELIMIT_WINDOW", defaultRateLimitWindow),
+			RPS:     mustPositiveInt("GATEWAY_RATELIMIT_RPS", defaultRateLimitRPS),
+			Burst:   mustPositiveInt("GATEWAY_RATELIMIT_BURST", defaultRateLimitBurst),
+			Window:  mustDuration("GATEWAY_RATELIMIT_WINDOW", defaultRateLimitWindow),
+			MaxKeys: mustPositiveInt("GATEWAY_RATELIMIT_MAX_KEYS", defaultRateLimitMaxKeys),
 		},
 		HealthCheckTimeout: mustDuration("GATEWAY_HEALTH_CHECK_TIMEOUT", defaultHealthCheckTimeout),
 		WorkerPoolSize:     mustPositiveInt("GATEWAY_WORKER_POOL_SIZE", defaultWorkerPoolSize),
@@ -345,6 +356,9 @@ func (c *Config) Validate() error {
 	}
 	if c.RateLimit.Burst <= 0 {
 		return fmt.Errorf("rateLimit.Burst must be > 0, got %d", c.RateLimit.Burst)
+	}
+	if c.RateLimit.MaxKeys <= 0 {
+		return fmt.Errorf("rateLimit.MaxKeys must be > 0, got %d", c.RateLimit.MaxKeys)
 	}
 
 	if c.Server.ShutdownTimeout <= 0 {

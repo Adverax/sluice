@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -267,4 +268,129 @@ type errRepo struct{}
 
 func (errRepo) Allow(context.Context, string, int, time.Duration) (ratelimit.Decision, error) {
 	return ratelimit.Decision{}, context.DeadlineExceeded
+}
+
+// TestRateLimit_CookieRoundTrip covers the cookie-based bucket reuse path
+// (ADR-0001 / MANDATORY FIX 1):
+//
+//  1. A first keyless request (no Authorization header, no cookie) → middleware
+//     mints a fresh key, sets X-Sluice-Api-Key + Set-Cookie, and the request
+//     counts against the new bucket.
+//  2. A follow-up request carrying ONLY the cookie (no header) → middleware
+//     must reuse the SAME bucket (no new registry entry is created, the counter
+//     continues from where it left off).
+//  3. A request with neither header nor cookie creates a NEW key (and bucket).
+//
+// The test also verifies that header-omission cannot bypass the limit once the
+// registry has a cookie for the key: draining the bucket via cookie-only
+// requests should produce 429 just like direct key usage.
+func TestRateLimit_CookieRoundTrip(t *testing.T) {
+	clk := &fixedClock{now: time.Unix(1_700_000_000, 0)}
+	// Burst of 3 so we can drain it quickly.
+	reg := ratelimit.NewRegistry(3, 3, ratelimit.WithClock(clk.Now), ratelimit.WithSweepInterval(time.Hour))
+	defer reg.Close()
+	spy := &spyHandler{}
+
+	var mintCount atomic.Int64
+	// Produce valid eph_ keys: prefix + 32 hex chars (zero-padded counter).
+	minter := func() string {
+		n := mintCount.Add(1)
+		return fmt.Sprintf("%s%032x", ephemeralKeyPrefix, n)
+	}
+	mw := NewRateLimiter(reg, nil, 3, time.Second, discardLogger(), WithKeyMinter(minter)).Middleware(spy)
+
+	// --- Step 1: first keyless request mints a key and sets the cookie. ---
+	rec1 := httptest.NewRecorder()
+	mw.ServeHTTP(rec1, httptest.NewRequest(http.MethodPost, "/", nil))
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first keyless request: got %d, want 200", rec1.Code)
+	}
+	mintedKey := rec1.Header().Get(apiKeyHeader)
+	if mintedKey == "" {
+		t.Fatalf("first keyless request: missing %s header", apiKeyHeader)
+	}
+
+	var mintedCookie *http.Cookie
+	for _, c := range rec1.Result().Cookies() {
+		if c.Name == apiKeyCookie {
+			mintedCookie = c
+		}
+	}
+	if mintedCookie == nil {
+		t.Fatalf("first keyless request: missing %s Set-Cookie", apiKeyCookie)
+	}
+	if mintedCookie.Value != mintedKey {
+		t.Fatalf("cookie value %q != header value %q", mintedCookie.Value, mintedKey)
+	}
+
+	sizeBefore := reg.Len() // should be 1 (only the minted key)
+
+	// --- Step 2: follow-up with the cookie only (no Authorization header). ---
+	// Bucket already consumed 1 token; 2 remain (burst=3).
+	for i := 0; i < 2; i++ {
+		r2 := httptest.NewRequest(http.MethodPost, "/", nil)
+		r2.AddCookie(mintedCookie) // carry the issued cookie
+		rec2 := httptest.NewRecorder()
+		mw.ServeHTTP(rec2, r2)
+		if rec2.Code != http.StatusOK {
+			t.Fatalf("cookie-only request %d: got %d, want 200", i+1, rec2.Code)
+		}
+	}
+
+	// Registry must NOT have grown — cookie reused the existing bucket.
+	if got := reg.Len(); got != sizeBefore {
+		t.Fatalf("registry size after cookie-only requests: got %d, want %d (same bucket reused)", got, sizeBefore)
+	}
+
+	// Bucket is now empty (burst=3, three tokens consumed). Next cookie-only
+	// request must get 429 — proving the cookie kept accumulating against the
+	// same bucket and that header-omission does NOT reset it.
+	r3 := httptest.NewRequest(http.MethodPost, "/", nil)
+	r3.AddCookie(mintedCookie)
+	rec3 := httptest.NewRecorder()
+	mw.ServeHTTP(rec3, r3)
+	if rec3.Code != http.StatusTooManyRequests {
+		t.Fatalf("4th request with exhausted bucket (cookie-only): got %d, want 429", rec3.Code)
+	}
+
+	// --- Step 3: a brand new request with neither header nor cookie mints a
+	// DIFFERENT key (separate bucket). It does not inherit the exhausted one.
+	mintCount.Store(99) // force a distinct minted key
+	r4 := httptest.NewRequest(http.MethodPost, "/", nil)
+	rec4 := httptest.NewRecorder()
+	mw.ServeHTTP(rec4, r4)
+	if rec4.Code != http.StatusOK {
+		t.Fatalf("fresh keyless request (no header, no cookie): got %d, want 200", rec4.Code)
+	}
+	freshKey := rec4.Header().Get(apiKeyHeader)
+	if freshKey == mintedKey {
+		t.Fatalf("fresh request got same key as exhausted bucket (%q); want a new key", freshKey)
+	}
+}
+
+// TestRateLimit_CryptoRandFailClosed verifies that a crypto/rand failure
+// (minter returns "") results in a 500 Internal Server Error, not a passthrough
+// or a request counted against an empty-string bucket (Minor fix / fail-closed).
+func TestRateLimit_CryptoRandFailClosed(t *testing.T) {
+	reg := ratelimit.NewRegistry(10, 10, ratelimit.WithSweepInterval(time.Hour))
+	defer reg.Close()
+	spy := &spyHandler{}
+
+	// Simulate a crypto/rand failure by returning "".
+	mw := NewRateLimiter(reg, nil, 10, time.Second, discardLogger(),
+		WithKeyMinter(func() string { return "" }),
+	).Middleware(spy)
+
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("crypto/rand failure: got %d, want 500 (fail-closed)", rec.Code)
+	}
+	if got := spy.called.Load(); got != 0 {
+		t.Fatalf("downstream called %d times, want 0 (request must not reach handler)", got)
+	}
+	// Registry must be empty — the empty key must not have been inserted.
+	if got := reg.Len(); got != 0 {
+		t.Fatalf("registry size after fail-closed: got %d, want 0", got)
+	}
 }

@@ -1,0 +1,108 @@
+version: 1
+generated_at: "2026-06-25T09:30:00Z"
+target: "card/005-rate-limiting-ephemeral-key (cycle 2/3)"
+overall_score: 8.5
+risk_level: low
+review_lane: fast
+reviewer: forge:review
+
+coverage:
+  read:
+    - internal/ratelimit/ratelimit.go
+    - internal/ratelimit/memrepo.go
+    - internal/ratelimit/redisrepo.go
+    - internal/ratelimit/ratelimit_test.go
+    - internal/ratelimit/redisrepo_test.go
+    - internal/middleware/ratelimit.go
+    - internal/middleware/ratelimit_test.go
+    - internal/config/config.go
+    - cmd/gateway/main.go
+  not_reached:
+    - internal/api (generated; out of scope)
+  confidence: high
+metrics:
+  diff: { files: 9, added: 0, removed: 0 }
+  tests_cover_change: true
+  hotspots: []
+  cochange_missing: []
+
+root_causes: []
+
+findings:
+  - id: F-001
+    severity: medium
+    category: feature
+    type: risk
+    file: internal/ratelimit/ratelimit.go
+    line: 205
+    title: "Hard-cap LRU eviction can reset a throttled key's local bucket (eviction-as-bypass)"
+    description: |
+      evictLRULocked evicts purely by lastAccess and ignores token-bucket fill.
+      A victim that bursts, gets throttled, then pauses to honour Retry-After has
+      a stale lastAccess. An attacker flooding the registry with distinct fresh
+      keys under cap pressure can make the victim's near-empty bucket the LRU
+      entry and evict it; on the victim's next request it gets a brand-new FULL
+      bucket — the local per-instance burst limit is reset. The distributed Redis
+      tier (Tier 2) still enforces the per-key global cap, so the global limit is
+      NOT bypassable; the exposure is the LOCAL tier only. It becomes the sole
+      enforcement when repo is nil (single-instance default, main.go always wires
+      Redis but the constructor permits nil and the default MemoryRepository path
+      is per-instance). The idle-sweep is correctly safe (full-bucket only); only
+      the hard-cap path has this property. Default maxKeys=100000 makes this
+      expensive but not impossible to weaponise.
+    suggestion: |
+      In evictLRULocked, prefer evicting full/near-full buckets first (a bucket at
+      capacity is safe to drop), and only evict a non-full (actively-throttled)
+      bucket as a last resort — or skip eviction and reject (or briefly tolerate
+      overshoot) when every entry is non-full. Alternatively raise the cap or
+      document the local-tier reset as accepted given the Redis backstop.
+    confidence: high
+    source: static
+    root_cause: null
+    status: open
+    fixed_in: null
+    dismissed_reason: null
+
+  - id: F-002
+    severity: low
+    category: tech-debt
+    type: gap
+    file: internal/ratelimit/ratelimit.go
+    line: 167
+    title: "Close() is not idempotent against concurrent/double shutdown despite doc claim"
+    description: |
+      The doc says Close is safe to call multiple times and idempotent. context
+      CancelFunc is in fact safe to call repeatedly, so the claim holds — but
+      there is no guard and no test asserting double-Close. Low risk; noting for a
+      regression test since FR-012 graceful shutdown relies on it.
+    suggestion: |
+      Add a small test calling Close() twice; optionally wrap stopSweep in a
+      sync.Once for clarity.
+    confidence: high
+    source: static
+    root_cause: null
+    status: open
+    fixed_in: null
+    dismissed_reason: null
+
+  - id: F-003
+    severity: low
+    category: tech-debt
+    type: gap
+    file: internal/middleware/ratelimit.go
+    line: 196
+    title: "Cookie reuse keeps SameSite=Lax minted cookie but no Secure flag"
+    description: |
+      The minted cookie is HttpOnly + SameSite=Lax but not Secure. Over plain HTTP
+      this is fine for a dev gateway, but in TLS deployments the rate-limit
+      identity cookie can be sent over cleartext. Not a limit-bypass (the cookie
+      is only an identifier, validated for shape, never trusted as auth), so it is
+      Minor.
+    suggestion: |
+      Set Secure: true when the request/scheme is HTTPS (or gate via config).
+    confidence: medium
+    source: static
+    root_cause: null
+    status: open
+    fixed_in: null
+    dismissed_reason: null

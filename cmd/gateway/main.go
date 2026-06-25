@@ -147,7 +147,12 @@ func run() error {
 	// redisClient as the health checker) enforces the shared cross-instance cap.
 	// On a Redis error the middleware FAILS OPEN to the local limiter (a Redis
 	// blip must not 429/503 the whole fleet — see internal/middleware docs).
-	rlRegistry := ratelimit.NewRegistry(cfg.RateLimit.RPS, cfg.RateLimit.Burst)
+	// The registry is bounded by MaxKeys (GATEWAY_RATELIMIT_MAX_KEYS) with
+	// LRU-style eviction and a periodic idle-sweep; Close stops its goroutine.
+	rlRegistry := ratelimit.NewRegistry(cfg.RateLimit.RPS, cfg.RateLimit.Burst,
+		ratelimit.WithMaxKeys(cfg.RateLimit.MaxKeys),
+	)
+	defer rlRegistry.Close()
 	rlRepo := ratelimit.NewRedisRepository(redisClient)
 	rateLimiter := middleware.NewRateLimiter(
 		rlRegistry, rlRepo, cfg.RateLimit.RPS, cfg.RateLimit.Window, logger,
