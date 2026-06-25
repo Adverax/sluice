@@ -1,6 +1,6 @@
 # CARD-014: Streaming through the resilience seam
 
-**Status:** ready
+**Status:** done
 **Priority:** P1
 **Category:** feature
 **Estimate:** 1.5d
@@ -11,11 +11,11 @@
 **Worktree:** —
 **Source:** doc/requirements-audit.md (gap #3: streaming path bypasses pool/breaker + provider metrics/span)
 **Depends on:** CARD-004, CARD-007, CARD-008, CARD-009, CARD-013
-**Review score:** —
-**Started:** —
-**Closed:** —
-**Actual:** —
-**Merge commit:** —
+**Review score:** 8.5 (2 cycles; 0 crit/imp; +composed-chain cancel test & nil-guards; AC-014a–d ✓)
+**Started:** 2026-06-25T13:51:36Z
+**Closed:** 2026-06-25T14:21:30Z
+**Actual:** 0.1d
+**Merge commit:** 9770321
 **Blocked by:** —
 
 ## What to implement

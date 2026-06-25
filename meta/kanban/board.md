@@ -15,13 +15,7 @@ _none_
 
 | CARD | Title | Phase | Pri | Est | Branch |
 |------|-------|-------|-----|-----|--------|
-| CARD-014 | Streaming through resilience (breaker/pool + metrics/span) | implementation | P1 | 1.5d | card/014-streaming-resilience |
-
-## Hardening wave (audit gaps) — ready
-
-| CARD | Title | Gap | Pri |
-|------|-------|-----|-----|
-| CARD-015 | Conformance: Redis token-bucket, metering_buffer_size metric, drained/flushed log | #5 | P2 |
+| CARD-015 | Conformance: Redis token-bucket, metering_buffer_size metric, drained/flushed log | implementation | P2 | 1d | card/015-conformance-tweaks |
 
 ---
 
@@ -31,7 +25,7 @@ _none_
 
 ---
 
-## Done (13)
+## Done (14)
 
 | CARD | Title | Pri | Score | Actual | Merge |
 |------|-------|-----|-------|--------|-------|
@@ -48,6 +42,7 @@ _none_
 | CARD-010 | Async usage metering → Postgres | P2 | 9.5 | 0.1d | 86f2f21 |
 | CARD-011 | Load test, race-suite, CI & make up | P2 | 9.5 | 0.1d | b0e400b |
 | CARD-013 | HTTP provider adapter + pooled client (gap #4) | P1 | 9.5 | 0.1d | fa69f1b |
+| CARD-014 | Streaming through resilience seam (gap #3) | P1 | 8.5 | 0.1d | 9770321 |
 
 ---
 
