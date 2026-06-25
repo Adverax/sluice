@@ -101,7 +101,8 @@ func doPost(t *testing.T, h http.Handler, body string, headers map[string]string
 
 // TestCache_Hit_ReturnsCachedResponse (AC-014): the first request stores; an
 // identical second request returns X-Cache: HIT with the same body WITHOUT
-// invoking the downstream handler (provider not contacted).
+// invoking the downstream handler (provider not contacted). The HIT response
+// must carry the same Content-Type as the MISS response (header parity).
 func TestCache_Hit_ReturnsCachedResponse(t *testing.T) {
 	repo := newFakeCacheRepo()
 	spy := &cacheSpyHandler{body: `{"id":"resp-1","choices":[]}`}
@@ -117,6 +118,7 @@ func TestCache_Hit_ReturnsCachedResponse(t *testing.T) {
 	if spy.count() != 1 {
 		t.Fatalf("handler calls after first request = %d, want 1", spy.count())
 	}
+	missContentType := rr1.Header().Get("Content-Type")
 
 	// Second identical request: HIT, served from cache, handler NOT called again.
 	rr2 := doPost(t, h, body, nil)
@@ -131,6 +133,15 @@ func TestCache_Hit_ReturnsCachedResponse(t *testing.T) {
 	}
 	if spy.count() != 1 {
 		t.Fatalf("handler calls after cache hit = %d, want 1 (provider must not be contacted)", spy.count())
+	}
+
+	// HIT Content-Type must equal MISS Content-Type (header parity assertion).
+	hitContentType := rr2.Header().Get("Content-Type")
+	if hitContentType != missContentType {
+		t.Fatalf("HIT Content-Type = %q, MISS Content-Type = %q: header parity violated", hitContentType, missContentType)
+	}
+	if hitContentType != "application/json" {
+		t.Fatalf("HIT Content-Type = %q, want %q", hitContentType, "application/json")
 	}
 }
 
@@ -307,5 +318,99 @@ func TestCache_BodyRestoredForDownstream(t *testing.T) {
 
 	if seen != body {
 		t.Fatalf("downstream read body = %q, want %q (body must be restored)", seen, body)
+	}
+}
+
+// TestCache_CorruptEnvelopeTreatedAsMiss verifies that if the stored value in
+// the repository cannot be decoded as a valid cacheEnvelope (e.g. it was
+// written in a previous format), the middleware falls through to the live
+// handler rather than 500-ing.
+func TestCache_CorruptEnvelopeTreatedAsMiss(t *testing.T) {
+	repo := newFakeCacheRepo()
+	spy := &cacheSpyHandler{body: `{"id":"fresh"}`}
+	h := NewCacheMiddleware(repo, time.Minute, testLogger()).Middleware(spy)
+
+	reqBody := `{"model":"mock","messages":[]}`
+	key := cacheKey(http.MethodPost, cacheRoute, []byte(reqBody))
+
+	// Inject a corrupt (non-envelope) value directly into the repo.
+	_ = repo.Set(context.Background(), key, []byte("not-valid-json-envelope"), time.Minute)
+
+	rr := doPost(t, h, reqBody, nil)
+
+	// Should have fallen through to the handler (live response).
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	if spy.count() != 1 {
+		t.Fatalf("handler calls = %d, want 1 (corrupt entry must be treated as MISS)", spy.count())
+	}
+	if rr.Body.String() != spy.body {
+		t.Fatalf("body = %q, want %q", rr.Body.String(), spy.body)
+	}
+}
+
+// TestCache_OversizedBodyFallsThrough verifies that a request body exceeding
+// the configured cap bypasses the cache entirely (no Get/Set) and the downstream
+// handler receives the COMPLETE, untruncated body (not a 413 from the cache layer,
+// no corruption from partial reads).
+func TestCache_OversizedBodyFallsThrough(t *testing.T) {
+	const cap = 16 // tiny cap so the test body easily exceeds it
+
+	repo := newFakeCacheRepo()
+
+	// Echo handler: reads the full request body and writes it back as the response,
+	// so we can assert byte-for-byte completeness on the response.
+	var handlerCalls int
+	var mu sync.Mutex
+	echo := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		handlerCalls++
+		mu.Unlock()
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "body read error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(b)
+	})
+
+	h := NewCacheMiddleware(repo, time.Minute, testLogger(), WithMaxBodyBytes(cap)).Middleware(echo)
+
+	// bigBody is definitely >cap bytes (well over 16 bytes) plus a large extra payload
+	// to ensure the remainder-of-stream path is exercised.
+	bigBody := `{"model":"mock","messages":[{"role":"user","content":"this is a long message that exceeds the cap"}]}`
+	if len(bigBody) <= cap {
+		t.Fatalf("test setup: bigBody length %d must exceed cap %d", len(bigBody), cap)
+	}
+
+	rr := doPost(t, h, bigBody, nil)
+
+	// Must succeed — no 413 from the cache layer.
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (oversized body must not produce 413 from cache layer)", rr.Code)
+	}
+
+	// Handler must be invoked exactly once.
+	mu.Lock()
+	calls := handlerCalls
+	mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("handler calls = %d, want 1", calls)
+	}
+
+	// Cache must not be consulted or written.
+	getCalls, setCalls := repo.counts()
+	if getCalls != 0 || setCalls != 0 {
+		t.Fatalf("repo touched for oversized body: get=%d set=%d, want 0/0", getCalls, setCalls)
+	}
+
+	// CRITICAL: the downstream handler must receive the COMPLETE, untruncated body.
+	// The echo handler writes back exactly what it read, so response body == input.
+	got := rr.Body.String()
+	if got != bigBody {
+		t.Fatalf("downstream body mismatch:\n  got  len=%d %q\n  want len=%d %q\n(body must not be truncated by the cache layer)", len(got), got, len(bigBody), bigBody)
 	}
 }

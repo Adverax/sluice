@@ -214,7 +214,9 @@ func run() error {
 	// become a client error — AC-017). The default TTL comes from config
 	// (GATEWAY_CACHE_TTL, default 5m); X-Cache-TTL overrides it per request.
 	cacheRepo := cache.NewRedisRepository(redisClient)
-	cacheMW := middleware.NewCacheMiddleware(cacheRepo, cfg.Cache.TTL, logger)
+	cacheMW := middleware.NewCacheMiddleware(cacheRepo, cfg.Cache.TTL, logger,
+		middleware.WithMaxBodyBytes(cfg.Cache.MaxBodyBytes),
+	)
 
 	// Composition order (ADR-0006), outermost first:
 	//   recover → logging → tracing → metrics → rate-limit → counting → cache → routes.

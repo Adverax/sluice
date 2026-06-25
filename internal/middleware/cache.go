@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -30,7 +31,51 @@ const (
 	// request, in whole seconds (ADR-0004). Invalid values are ignored and the
 	// configured default applies.
 	ttlOverrideHeader = "X-Cache-TTL"
+
+	// defaultMaxBodyBytes is the cap on the request body buffered for cache
+	// keying when no GATEWAY_CACHE_MAX_BODY_BYTES override is provided. 1 MiB
+	// is a conservative upper bound for a chat-completion JSON payload; larger
+	// bodies fall through to the handler WITHOUT caching (never a 413 from this
+	// layer — let the validator/handler own that decision).
+	defaultMaxBodyBytes = 1 << 20 // 1 MiB
 )
+
+// cacheEnvelope is what the cache middleware stores in the repository. Encoding
+// is JSON with the body base64-encoded so the envelope is a valid UTF-8 JSON
+// document (the body may be arbitrary bytes). The envelope is self-contained in
+// this package; no other package needs to know its format.
+//
+// Versioning note: if the format ever changes, decode failures are treated as a
+// cache MISS (fall through to the live handler), so old and new format entries
+// can coexist safely during a rolling deploy.
+type cacheEnvelope struct {
+	ContentType string `json:"ct"`
+	// Body is the raw response body, base64-encoded for JSON safety.
+	Body string `json:"b"`
+}
+
+// encodeCacheEnvelope serialises the envelope to bytes for storage.
+func encodeCacheEnvelope(contentType string, body []byte) ([]byte, error) {
+	env := cacheEnvelope{
+		ContentType: contentType,
+		Body:        base64.StdEncoding.EncodeToString(body),
+	}
+	return json.Marshal(env)
+}
+
+// decodeCacheEnvelope deserialises the envelope. A decode failure is returned
+// as an error; the caller must treat it as a cache MISS.
+func decodeCacheEnvelope(data []byte) (contentType string, body []byte, err error) {
+	var env cacheEnvelope
+	if err = json.Unmarshal(data, &env); err != nil {
+		return "", nil, err
+	}
+	body, err = base64.StdEncoding.DecodeString(env.Body)
+	if err != nil {
+		return "", nil, err
+	}
+	return env.ContentType, body, nil
+}
 
 // streamProbe is a tolerant minimal view of the chat-completion request body:
 // it extracts only the "stream" flag and ignores every other field. A
@@ -55,9 +100,25 @@ type streamProbe struct {
 // logged and the request falls through to the live handler, so a Redis outage
 // never becomes a client error (AC-017, resilience).
 type CacheMiddleware struct {
-	repo       cache.CacheRepository
-	defaultTTL time.Duration
-	logger     *slog.Logger
+	repo         cache.CacheRepository
+	defaultTTL   time.Duration
+	logger       *slog.Logger
+	maxBodyBytes int64
+}
+
+// CacheOption configures a CacheMiddleware.
+type CacheOption func(*CacheMiddleware)
+
+// WithMaxBodyBytes sets the per-request body-size cap for cache keying. Bodies
+// exceeding the cap fall through to the handler WITHOUT caching (never a 413
+// from this layer — the validator/handler owns that decision). The default is
+// defaultMaxBodyBytes (1 MiB) when unset or non-positive.
+func WithMaxBodyBytes(n int64) CacheOption {
+	return func(m *CacheMiddleware) {
+		if n > 0 {
+			m.maxBodyBytes = n
+		}
+	}
 }
 
 // NewCacheMiddleware builds the cache middleware. repo is the injected
@@ -66,15 +127,20 @@ type CacheMiddleware struct {
 // logger is injected (ADR-0008). A nil repo disables caching (every request
 // passes through untouched), and a non-positive defaultTTL falls back to 5m so
 // the middleware can never store a non-expiring entry.
-func NewCacheMiddleware(repo cache.CacheRepository, defaultTTL time.Duration, logger *slog.Logger) *CacheMiddleware {
+func NewCacheMiddleware(repo cache.CacheRepository, defaultTTL time.Duration, logger *slog.Logger, opts ...CacheOption) *CacheMiddleware {
 	if defaultTTL <= 0 {
 		defaultTTL = 5 * time.Minute
 	}
-	return &CacheMiddleware{
-		repo:       repo,
-		defaultTTL: defaultTTL,
-		logger:     logger,
+	m := &CacheMiddleware{
+		repo:         repo,
+		defaultTTL:   defaultTTL,
+		logger:       logger,
+		maxBodyBytes: defaultMaxBodyBytes,
 	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // Middleware returns the http middleware function (the chain link). It is
@@ -90,19 +156,30 @@ func (m *CacheMiddleware) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Read + RESTORE the body so the downstream handler can re-read it. On a
-		// read error fall through to the handler with whatever remains; the cache
-		// simply does not engage for this request.
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			m.logger.LogAttrs(r.Context(), slog.LevelWarn,
-				"cache: failed to read request body; bypassing cache",
-				slog.String("error", err.Error()),
-			)
-			r.Body = io.NopCloser(bytes.NewReader(body))
+		// Read + RESTORE the body so the downstream handler can re-read it.
+		//
+		// Body-size cap: read up to maxBodyBytes+1 bytes using a plain LimitReader
+		// (intentionally NOT http.MaxBytesReader, which would flag the connection
+		// "request too large" as a side effect and corrupt the body for downstream).
+		//
+		// If we read more than maxBodyBytes bytes the body exceeds the cap: reconstruct
+		// the FULL stream from the already-read head and the still-unread remainder,
+		// then bypass the cache. The downstream handler gets the COMPLETE body without
+		// any truncation (never a 413 from this layer — let the validator/handler own
+		// that decision).
+		//
+		// If the read fits within the cap, head IS the entire body and we proceed
+		// with the normal cache key/Get/Set flow.
+		head, _ := io.ReadAll(io.LimitReader(r.Body, m.maxBodyBytes+1))
+		if int64(len(head)) > m.maxBodyBytes {
+			// Oversize: restore the full stream (already-read head + unread remainder)
+			// and bypass the cache without truncation.
+			r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(head), r.Body))
 			next.ServeHTTP(w, r)
 			return
 		}
+		// Within cap: head is the complete body. Restore it for the downstream handler.
+		body := head
 		r.Body = io.NopCloser(bytes.NewReader(body))
 
 		// Streaming requests bypass the cache entirely — no key is computed and
@@ -116,19 +193,35 @@ func (m *CacheMiddleware) Middleware(next http.Handler) http.Handler {
 
 		key := cacheKey(r.Method, r.URL.Path, body)
 
-		// Cache GET. On a HIT, replay the cached status+body and return WITHOUT
-		// calling next — the provider is never contacted (AC-014). On a backend
-		// error, log and fall through to the live handler (AC-017).
+		// Cache GET. On a HIT, decode the envelope and replay the stored
+		// Content-Type + body so the client receives identical headers on HIT and
+		// MISS (a bare body write without Content-Type would cause divergence).
+		// If the stored value cannot be decoded (corrupt entry or old format from
+		// a rolling deploy), treat it as a MISS and fall through to the live
+		// handler — never 500 from the cache layer (AC-017).
+		// On a backend error, log and fall through (AC-017).
 		if cached, found, getErr := m.repo.Get(r.Context(), key); getErr != nil {
 			m.logger.LogAttrs(r.Context(), slog.LevelWarn,
 				"cache: get failed; serving live",
 				slog.String("error", getErr.Error()),
 			)
 		} else if found {
-			w.Header().Set(cacheHeader, cacheHitValue)
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(cached)
-			return
+			ct, bodyBytes, decErr := decodeCacheEnvelope(cached)
+			if decErr != nil {
+				m.logger.LogAttrs(r.Context(), slog.LevelWarn,
+					"cache: corrupt envelope; serving live",
+					slog.String("error", decErr.Error()),
+				)
+				// Fall through to the live handler below.
+			} else {
+				if ct != "" {
+					w.Header().Set("Content-Type", ct)
+				}
+				w.Header().Set(cacheHeader, cacheHitValue)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(bodyBytes)
+				return
+			}
 		}
 
 		// MISS: capture the downstream response so a cacheable result can be
@@ -141,17 +234,29 @@ func (m *CacheMiddleware) Middleware(next http.Handler) http.Handler {
 		// Only cache a successful 200 response. Use the per-request TTL override
 		// when present and valid, else the configured default (ADR-0004).
 		if rec.status == http.StatusOK {
-			ttl := m.resolveTTL(r)
-			// Detach from the request context so cancellation of the (completed)
-			// request does not abort the best-effort store, but bound it so a slow
-			// Redis cannot leak goroutines indefinitely.
-			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 2*time.Second)
-			defer cancel()
-			if setErr := m.repo.Set(ctx, key, rec.body.Bytes(), ttl); setErr != nil {
+			// Encode body + Content-Type into an envelope so the HIT path can
+			// replay the exact headers. Content-Type is read from the UNDERLYING
+			// writer's header map (already sent to the client by the recorder).
+			ct := w.Header().Get("Content-Type")
+			envelope, encErr := encodeCacheEnvelope(ct, rec.body.Bytes())
+			if encErr != nil {
 				m.logger.LogAttrs(r.Context(), slog.LevelWarn,
-					"cache: set failed; response served but not cached",
-					slog.String("error", setErr.Error()),
+					"cache: envelope encode failed; response served but not cached",
+					slog.String("error", encErr.Error()),
 				)
+			} else {
+				ttl := m.resolveTTL(r)
+				// Detach from the request context so cancellation of the (completed)
+				// request does not abort the best-effort store, but bound it so a slow
+				// Redis cannot leak goroutines indefinitely.
+				ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 2*time.Second)
+				defer cancel()
+				if setErr := m.repo.Set(ctx, key, envelope, ttl); setErr != nil {
+					m.logger.LogAttrs(r.Context(), slog.LevelWarn,
+						"cache: set failed; response served but not cached",
+						slog.String("error", setErr.Error()),
+					)
+				}
 			}
 		}
 	})
@@ -173,6 +278,15 @@ func (m *CacheMiddleware) resolveTTL(r *http.Request) time.Duration {
 // cacheKey hashes the canonical request identity (method + path + raw body
 // bytes) into a hex sha256 string. See the CacheMiddleware doc comment for the
 // whitespace/key-order canonicalization limitation.
+//
+// Cross-tenant design (INTENTIONAL): the key does NOT include the caller's API
+// key or any tenant identifier. Identical request bodies produce identical model
+// outputs, so cache entries are shared across API keys by design — this is a
+// correctness-preserving optimisation (the cached chat-completion body is not
+// user-specific data). The trade-off is that one tenant's X-Cache-TTL header
+// influences the shared entry's lifetime: whichever request first populates the
+// entry wins the TTL race. This is acceptable for v1; per-tenant isolation is
+// deferred to a future ADR if needed.
 func cacheKey(method, path string, body []byte) string {
 	h := sha256.New()
 	h.Write([]byte(method))
