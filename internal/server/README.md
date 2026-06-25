@@ -40,10 +40,23 @@ http.Handler (kin-openapi validator)
 
 | Route | AC | Notes |
 |-------|----|-------|
-| `POST /v1/chat/completions` | AC-001 (200), AC-003/019/021 (502), AC-004/006 (400), AC-007 (404), AC-020/022 (503) | OpenAPI validator fires first; resilience errors checked before generic 502 |
+| `POST /v1/chat/completions` | AC-001 (200), AC-002 (streaming), AC-003/019/021 (502), AC-004/006 (400), AC-007 (404), AC-020/022 (503) | OpenAPI validator fires first; resilience errors checked before generic 502 |
 | `GET /healthz` | AC-025 | Always 200 while the process is alive |
 | `GET /readyz` | AC-026/027/028 | 200 all-ok, 503 with per-dependency map |
-| `GET /metrics` | — | Stub; returns 200 empty body until COMP-013 |
+| `GET /metrics` | AC-029/048 | Serves the injected Prometheus registry via `promhttp.HandlerFor` (COMP-013) |
+
+## Streaming (SSE, CARD-004)
+
+When the request has `"stream": true`, `CreateChatCompletion` returns a custom
+`streamResponse` strict-response object whose `VisitCreateChatCompletionResponse(w)`
+takes over the raw writer: sets `Content-Type: text/event-stream`, calls
+`provider.InferStream(r.Context(), …)`, forwards each canonical `Chunk` as
+`data: <json>\n\n`, flushes via `http.NewResponseController(w)` (traverses the
+metrics/tracing `Unwrap()` wrappers), and ends with `data: [DONE]`. The loop selects
+on `ctx.Done()`; a client disconnect cancels the context, which stops the (ctx-aware)
+provider producer — no goroutine leak (FR-003, AC-008/009). Validation + routing run
+before any SSE bytes. Resilience-for-streaming (breaker-guard on initiation, pool slot)
+is a documented follow-up; the unary path retains full pool→retry→breaker.
 
 ## See also
 
