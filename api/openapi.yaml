@@ -1,0 +1,284 @@
+openapi: 3.0.3
+info:
+  title: sluice gateway API
+  description: |
+    Public HTTP API for the sluice LLM gateway.
+
+    This specification is the single source of truth for the wire contract
+    (ADR-0011, contract-first). Server types and the routing boundary are
+    generated from it with `oapi-codegen` v2 (`std-http-server` + `models` +
+    `strict-server`). Handlers (CARD-003) implement the generated
+    `StrictServerInterface` and map these public DTOs to/from the canonical
+    `provider.Request`/`Response` via the anti-corruption layer (ADR-0009).
+  version: 1.0.0
+
+servers:
+  - url: /
+    description: The gateway exposes paths relative to its listen address.
+
+paths:
+  /v1/chat/completions:
+    post:
+      operationId: createChatCompletion
+      summary: Create a chat completion
+      description: |
+        Runs a chat completion against the upstream model selected by `model`.
+
+        When `stream` is `false` (the default) the gateway returns a single
+        JSON `ChatCompletionResponse` (200).
+
+        When `stream` is `true` the gateway responds with a
+        `text/event-stream` (Server-Sent Events) body instead of the JSON
+        document below. OpenAPI 3.0 cannot fully express an SSE response, so
+        only the non-streaming success shape is modelled here; the SSE wire
+        behaviour is implemented and tested in CARD-004.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatCompletionRequest'
+      responses:
+        '200':
+          description: |
+            The chat completion. For `stream:false` the body is a JSON
+            `ChatCompletionResponse`. For `stream:true` the body is a
+            `text/event-stream` (SSE) sequence (see operation description;
+            CARD-004).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatCompletionResponse'
+            text/event-stream:
+              schema:
+                type: string
+                description: Server-Sent Events stream of completion deltas (CARD-004).
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /healthz:
+    get:
+      operationId: getHealthz
+      summary: Liveness probe (FR-008)
+      description: Returns 200 as long as the process is alive.
+      responses:
+        '200':
+          description: The process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+
+  /readyz:
+    get:
+      operationId: getReadyz
+      summary: Readiness probe (FR-009)
+      description: |
+        Returns 200 when every registered dependency is healthy, or 503 when
+        at least one dependency is down. The body carries a per-dependency
+        status map in both cases.
+      responses:
+        '200':
+          description: All dependencies are healthy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessStatus'
+        '503':
+          description: At least one dependency is down.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessStatus'
+
+  /metrics:
+    get:
+      operationId: getMetrics
+      summary: Prometheus metrics exposition
+      description: |
+        Prometheus text exposition format. Documented here for completeness;
+        the body is plain text and not modelled as a JSON schema.
+      responses:
+        '200':
+          description: Prometheus metrics in text exposition format.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  schemas:
+    Message:
+      type: object
+      description: One chat message. Aligned with the canonical provider.Message.
+      required:
+        - role
+        - content
+      properties:
+        role:
+          type: string
+          description: The author of the message.
+          enum:
+            - system
+            - user
+            - assistant
+        content:
+          type: string
+          description: The message text.
+
+    ChatCompletionRequest:
+      type: object
+      description: |
+        A chat completion request. Aligned with the canonical provider.Request
+        shape (mapped via the ACL in CARD-003).
+      required:
+        - model
+        - messages
+      properties:
+        model:
+          type: string
+          description: The upstream model to run the completion against.
+        messages:
+          type: array
+          description: The ordered chat history for the completion.
+          items:
+            $ref: '#/components/schemas/Message'
+        stream:
+          type: boolean
+          description: |
+            When true, the gateway responds with a `text/event-stream` (SSE)
+            body instead of a JSON response (CARD-004).
+          default: false
+        max_tokens:
+          type: integer
+          description: Optional upper bound on the completion length.
+        temperature:
+          type: number
+          description: Optional sampling temperature.
+
+    Usage:
+      type: object
+      description: |
+        Token accounting for a completion. Aligned with the canonical
+        provider.Usage.
+      required:
+        - prompt_tokens
+        - completion_tokens
+        - total_tokens
+      properties:
+        prompt_tokens:
+          type: integer
+        completion_tokens:
+          type: integer
+        total_tokens:
+          type: integer
+
+    ChatCompletionResponse:
+      type: object
+      description: |
+        A chat completion result. Aligned with the canonical provider.Response.
+      required:
+        - model
+        - content
+        - finish_reason
+        - usage
+      properties:
+        model:
+          type: string
+          description: The model that produced the completion.
+        content:
+          type: string
+          description: The assistant completion text.
+        finish_reason:
+          type: string
+          description: The canonical reason the completion ended (e.g. "stop", "length").
+        usage:
+          $ref: '#/components/schemas/Usage'
+
+    HealthStatus:
+      type: object
+      description: Liveness probe response.
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          description: Overall liveness status.
+
+    ReadinessStatus:
+      type: object
+      description: Readiness probe response with a per-dependency status map.
+      required:
+        - status
+        - dependencies
+      properties:
+        status:
+          type: string
+          description: Overall readiness status.
+        dependencies:
+          type: object
+          description: Per-dependency status; "ok" or an error description.
+          additionalProperties:
+            type: string
+
+    Error:
+      type: object
+      description: A structured JSON error body.
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          description: A short, machine-readable error code.
+        message:
+          type: string
+          description: A human-readable description of the error.
+
+  responses:
+    BadRequest:
+      description: The request was malformed or failed validation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: The requested resource (e.g. model) was not found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooManyRequests:
+      description: The client has been rate limited.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalServerError:
+      description: An unexpected server error occurred.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    BadGateway:
+      description: The upstream provider returned an invalid response.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServiceUnavailable:
+      description: The gateway or an upstream dependency is currently unavailable.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
