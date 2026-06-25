@@ -27,6 +27,7 @@ import (
 	"github.com/adverax/sluice/internal/health"
 	"github.com/adverax/sluice/internal/lifecycle"
 	"github.com/adverax/sluice/internal/logging"
+	"github.com/adverax/sluice/internal/pool"
 	"github.com/adverax/sluice/internal/provider"
 	"github.com/adverax/sluice/internal/proxy"
 	"github.com/adverax/sluice/internal/proxy/resilience"
@@ -113,9 +114,19 @@ func run() error {
 	)
 	composer := resilience.New(retrier, breakers, cfg.Breaker.RetryAfter)
 
+	// Worker pool / backpressure (COMP-010, FR-015, ADR-0006). The pool wraps the
+	// composed resilience InferFunc so the layering is pool → retry → breaker →
+	// provider: the pool acquires a slot at the ENTRY of the provider-call path
+	// (reject-before-work) and caps concurrent upstream calls at
+	// cfg.WorkerPoolSize (GATEWAY_WORKER_POOL_SIZE, default 100 — ADR-0003). When
+	// saturated it returns ErrPoolSaturated, which the server maps to 503 +
+	// Retry-After (the same 503 path as the resilience fast-fail). The signature
+	// is unchanged so CARD-005's rate-limit middleware can sit OUTSIDE this layer.
+	guardedInfer := pool.Guard(cfg.WorkerPoolSize, cfg.Breaker.RetryAfter, composer.InferFunc())
+
 	// HTTP boundary: implement the generated StrictServerInterface (ADR-0011)
 	// and register all routes on appMux via api.HandlerFromMux (CON-001).
-	srv := server.New(router, healthHandler, logger, server.WithInferFunc(composer.InferFunc()))
+	srv := server.New(router, healthHandler, logger, server.WithInferFunc(guardedInfer))
 	appMux := http.NewServeMux()
 	appHandler := srv.Handler(appMux)
 
