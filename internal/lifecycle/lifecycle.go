@@ -20,23 +20,71 @@ type Manager struct {
 	server          *http.Server
 	logger          *slog.Logger
 	shutdownTimeout time.Duration
+	// hookTimeout is the deadline given to EACH OnShutdown hook. It derives from
+	// a fresh context.Background() — NOT from the (possibly exhausted) HTTP-drain
+	// context — so the metering flush always gets its own budget even when
+	// server.Shutdown hit its deadline (forced-shutdown path). Default: 5s.
+	hookTimeout time.Duration
 
 	// inFlight counts requests currently being served. It is incremented by the
 	// CountingMiddleware and sampled at shutdown to log how many requests were
 	// drained.
 	inFlight int64
+
+	// onShutdown holds post-drain hooks run AFTER the HTTP server has drained
+	// in-flight requests (or the drain timed out), in registration order. Each
+	// hook receives its OWN fresh-deadline context so it is unaffected by whether
+	// the HTTP drain completed cleanly or was forced. The metering worker's Close
+	// is registered here so remaining buffered usage events are flushed before
+	// exit (AC-032 / FR-012).
+	onShutdown []func(context.Context) error
 }
 
-// New constructs a lifecycle Manager. shutdownTimeout bounds the drain; a value
-// <= 0 falls back to 30s.
-func New(server *http.Server, logger *slog.Logger, shutdownTimeout time.Duration) *Manager {
+// Option configures a Manager (functional options).
+type Option func(*Manager)
+
+// WithHookTimeout sets the per-hook deadline used for EACH OnShutdown hook. The
+// context passed to each hook is derived from context.Background() with this
+// timeout — NOT from the HTTP-drain context — so the hook always gets its own
+// budget regardless of whether the drain timed out. A value <= 0 is ignored
+// (keeps the default 5s). Configure via GATEWAY_SHUTDOWN_HOOK_TIMEOUT.
+func WithHookTimeout(d time.Duration) Option {
+	return func(m *Manager) {
+		if d > 0 {
+			m.hookTimeout = d
+		}
+	}
+}
+
+// New constructs a lifecycle Manager. shutdownTimeout bounds the HTTP drain; a
+// value <= 0 falls back to 30s. Use WithHookTimeout to set the per-hook budget
+// (default 5s).
+func New(server *http.Server, logger *slog.Logger, shutdownTimeout time.Duration, opts ...Option) *Manager {
 	if shutdownTimeout <= 0 {
 		shutdownTimeout = 30 * time.Second
 	}
-	return &Manager{
+	m := &Manager{
 		server:          server,
 		logger:          logger,
 		shutdownTimeout: shutdownTimeout,
+		hookTimeout:     5 * time.Second,
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// OnShutdown registers a hook to run during graceful shutdown AFTER the HTTP
+// server drain completes (or the drain deadline elapses). Hooks run in
+// registration order. Each hook receives its OWN fresh-deadline context
+// (context.Background() + hookTimeout) so it is unaffected by whether the HTTP
+// drain completed cleanly or was forced — the metering worker's Close always
+// gets a real budget to flush (AC-032 / FR-012). A nil hook is ignored.
+// Register hooks before Run.
+func (m *Manager) OnShutdown(hook func(context.Context) error) {
+	if hook != nil {
+		m.onShutdown = append(m.onShutdown, hook)
 	}
 }
 
@@ -81,9 +129,21 @@ func (m *Manager) Run(ctx context.Context) error {
 	}
 }
 
-// shutdown performs the graceful drain. The number of in-flight requests is
-// sampled at the start of the drain so the "drained N requests" line reflects
-// what was actually drained.
+// shutdown performs the graceful drain bounded by shutdownTimeout. The number of
+// in-flight requests is sampled at the start of the drain so the "drained N
+// requests" line reflects what was actually drained.
+//
+// Forced shutdown (AC-051): if the in-flight requests do not drain within
+// shutdownTimeout, server.Shutdown returns context.DeadlineExceeded. We do NOT
+// treat this as a hard failure — the process must still exit cleanly (forced).
+// We log "forced shutdown: N requests unfinished" with the count of still
+// in-flight requests, then proceed to the post-drain hooks.
+//
+// Post-drain hooks (e.g. the metering worker's Close — AC-032) always run on
+// BOTH the clean and forced paths. Each hook receives its OWN context derived
+// from context.Background() with hookTimeout, so the HTTP-drain deadline (which
+// may be exhausted on the forced path) does not affect the hooks' budget. This
+// guarantees the metering flush gets real time to complete in all cases.
 func (m *Manager) shutdown() error {
 	draining := atomic.LoadInt64(&m.inFlight)
 	m.logger.LogAttrs(context.Background(), slog.LevelInfo, "shutdown signal received, draining",
@@ -92,15 +152,43 @@ func (m *Manager) shutdown() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), m.shutdownTimeout)
 	defer cancel()
 
+	var shutdownErr error
 	if err := m.server.Shutdown(shutdownCtx); err != nil {
-		m.logger.LogAttrs(context.Background(), slog.LevelError, "graceful shutdown failed",
-			slog.String("error", err.Error()),
-			slog.Int64("in_flight", atomic.LoadInt64(&m.inFlight)))
-		return fmt.Errorf("graceful shutdown: %w", err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			// Forced shutdown: in-flight requests did not drain in time (AC-051).
+			// Log the count of unfinished requests; do not fail the process exit.
+			unfinished := atomic.LoadInt64(&m.inFlight)
+			m.logger.LogAttrs(context.Background(), slog.LevelWarn,
+				fmt.Sprintf("forced shutdown: %d requests unfinished", unfinished),
+				slog.Int64("unfinished", unfinished))
+		} else {
+			m.logger.LogAttrs(context.Background(), slog.LevelError, "graceful shutdown failed",
+				slog.String("error", err.Error()),
+				slog.Int64("in_flight", atomic.LoadInt64(&m.inFlight)))
+			shutdownErr = fmt.Errorf("graceful shutdown: %w", err)
+		}
+	} else {
+		m.logger.LogAttrs(context.Background(), slog.LevelInfo,
+			fmt.Sprintf("drained %d requests", draining),
+			slog.Int64("drained", draining))
 	}
 
-	m.logger.LogAttrs(context.Background(), slog.LevelInfo,
-		fmt.Sprintf("drained %d requests", draining),
-		slog.Int64("drained", draining))
-	return nil
+	// Post-drain hooks (AC-032): flush the metering buffer etc. before exit.
+	// Each hook runs with its OWN fresh context (not the HTTP-drain context)
+	// so even on the forced path the hook has a real deadline to complete.
+	// The first hook error is surfaced if no earlier error.
+	for _, hook := range m.onShutdown {
+		hookCtx, hookCancel := context.WithTimeout(context.Background(), m.hookTimeout)
+		err := hook(hookCtx)
+		hookCancel()
+		if err != nil {
+			m.logger.LogAttrs(context.Background(), slog.LevelError, "shutdown hook failed",
+				slog.String("error", err.Error()))
+			if shutdownErr == nil {
+				shutdownErr = fmt.Errorf("shutdown hook: %w", err)
+			}
+		}
+	}
+
+	return shutdownErr
 }

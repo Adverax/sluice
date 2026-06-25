@@ -25,6 +25,7 @@ func TestConfig_AllBoundariesHaveTimeouts(t *testing.T) {
 		{"Redis ReadTimeout", cfg.Redis.ReadTimeout},
 		{"Postgres AcquireTimeout", cfg.Postgres.AcquireTimeout},
 		{"HealthCheckTimeout", cfg.HealthCheckTimeout},
+		{"shutdown.HookTimeout", cfg.Shutdown.HookTimeout},
 	}
 	for _, b := range boundaries {
 		if b.value <= 0 {

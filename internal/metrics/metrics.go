@@ -29,6 +29,11 @@ type Recorder interface {
 	// SetBreakerState records the current circuit-breaker state for a provider
 	// (breaker_state): 0=closed, 1=half-open, 2=open.
 	SetBreakerState(provider string, state float64)
+	// IncMeteringEventsDropped records a single usage event dropped by the
+	// metering buffer when it is full (metering_events_dropped_total). The
+	// metering package depends on the narrower metering.DropRecorder port, which
+	// *Metrics also satisfies, so it never imports Prometheus (ADR-0008).
+	IncMeteringEventsDropped()
 }
 
 // Breaker state gauge values (breaker_state). Stable numeric encoding so the
@@ -61,6 +66,9 @@ type Metrics struct {
 	// BreakerState is the per-provider circuit-breaker state gauge
 	// (breaker_state{provider}).
 	BreakerState *prometheus.GaugeVec
+	// MeteringEventsDropped counts usage events dropped by the metering buffer
+	// when it is full (metering_events_dropped_total, COMP-016 / AC-036).
+	MeteringEventsDropped prometheus.Counter
 }
 
 // New registers the six required metrics against reg and returns the handle.
@@ -98,6 +106,10 @@ func New(reg *prometheus.Registry) *Metrics {
 			Name: "breaker_state",
 			Help: "Circuit-breaker state by provider (0=closed, 1=half-open, 2=open).",
 		}, []string{"provider"}),
+		MeteringEventsDropped: factory.NewCounter(prometheus.CounterOpts{
+			Name: "metering_events_dropped_total",
+			Help: "Total number of usage events dropped because the metering buffer was full.",
+		}),
 	}
 }
 
@@ -113,6 +125,9 @@ func (m *Metrics) SetBreakerState(provider string, state float64) {
 	m.BreakerState.WithLabelValues(provider).Set(state)
 }
 
+// IncMeteringEventsDropped implements Recorder.
+func (m *Metrics) IncMeteringEventsDropped() { m.MeteringEventsDropped.Inc() }
+
 // Compile-time proof *Metrics satisfies the Recorder port.
 var _ Recorder = (*Metrics)(nil)
 
@@ -126,5 +141,8 @@ func (NopRecorder) IncRateLimitRejected() {}
 
 // SetBreakerState implements Recorder (no-op).
 func (NopRecorder) SetBreakerState(string, float64) {}
+
+// IncMeteringEventsDropped implements Recorder (no-op).
+func (NopRecorder) IncMeteringEventsDropped() {}
 
 var _ Recorder = NopRecorder{}

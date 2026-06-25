@@ -13,7 +13,9 @@ Within a single Go process (CON-003) the event-passing mechanism between context
 
 ## Decision
 
-We adopt the `buffered_channel_drop_on_full` strategy: Proxy delivers events to CTX-004 via a Go buffered channel with a non-blocking send (`select` / `default`). On overflow the event is dropped and the `metering_events_dropped_total` counter is incremented. A Metering background worker reads from the channel. On graceful shutdown Proxy closes the channel after draining in-flight requests; Metering drains the remaining events and flushes them to Postgres (AC-032).
+We adopt the `buffered_channel_drop_on_full` strategy: Proxy delivers events to CTX-004 via a Go buffered channel with a non-blocking send (`select` / `default`). On overflow the event is dropped and the `metering_events_dropped_total` counter is incremented. A Metering background worker reads from the channel.
+
+On graceful shutdown, the lifecycle manager sends a **stop signal** to the worker via a separate `stop` channel (a `chan struct{}` that is closed once). The buffer channel itself is **never closed** — this is deliberate: closing the buffer channel would risk a panic if the hot path attempts a send on a closed channel after shutdown begins. The stop signal is safe because only the lifecycle manager sends it (never the hot path). On receiving the stop signal, the worker drains any events remaining in the buffer and flushes them to Postgres before exiting (AC-032).
 
 ## Alternatives considered
 
@@ -31,7 +33,7 @@ For each usage event Proxy launches a separate goroutine `go func() { metering.R
 
 ### Negative
 - Event loss on buffer overflow is acceptable per INV-007, but the operator must monitor `metering_events_dropped_total` — a non-zero value indicates that tuning is needed (increase buffer capacity or flush throughput).
-- Graceful shutdown requires coordinated shutdown ordering: Proxy must close the channel only after all in-flight requests complete, and Metering must drain the channel to completion before exiting. The shutdown sequence order must be strictly defined.
+- Graceful shutdown requires coordinated shutdown ordering: the lifecycle manager must send the stop signal to the worker only after HTTP in-flight requests have drained (or the drain deadline has elapsed), and the worker must drain any remaining buffered events before exiting. The shutdown sequence order must be strictly defined. The buffer channel is never closed (to prevent a send-on-closed-channel panic from the hot path); only the dedicated `stop` channel is closed.
 - **Billing durability: an honest limitation of the approach.** Usage events are a **billing ledger**. Drop-on-full means record loss under load. In-memory drop is **acceptable for a PoC/reference repository**, but **is not billing-grade durability**. Production would require a durable queue or write-ahead log (e.g., Kafka or a local WAL) before writing to Postgres. This is a deliberate maturity gap: "what I would add for production".
 
 ### Neutral
@@ -53,4 +55,5 @@ For each usage event Proxy launches a separate goroutine `go func() { metering.R
 
 ## History
 
-- 2026-06-25: Created — buffered channel with non-blocking send and drop-on-full; Metering background worker; graceful shutdown with flush via close-and-drain.
+- 2026-06-25: Created — buffered channel with non-blocking send and drop-on-full; Metering background worker; graceful shutdown with flush via stop-signal-and-drain (buffer channel never closed; avoids send-on-closed panic).
+- 2026-06-25: Revised — clarified realised design: stop-signal (`stop chan struct{}`) rather than closing the buffer channel; updated Decision and Consequences to match implementation.
