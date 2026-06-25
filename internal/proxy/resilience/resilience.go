@@ -134,3 +134,55 @@ func (c *Composer) InferFunc() server.InferFunc {
 		return provider.Response{}, err
 	}
 }
+
+// StreamFunc returns the composed server.StreamFunc for the streaming path
+// (CARD-014): breaker.ExecuteStream(provider.InferStream), with NO retry — a
+// partially-sent stream cannot be safely replayed, so the retry engine is
+// deliberately absent from this seam (ADR-0006, documented choice).
+//
+// The breaker guards stream INITIATION keyed by the request model (the same
+// per-provider key/registry as the unary path, FR-007): an OPEN breaker returns
+// ErrOpenState immediately (mapped here to *Unavailable → server 503 + Retry-
+// After, BEFORE any SSE byte, AC-014a); a successful initiation counts as a
+// breaker success; an initiation error counts as a breaker failure. Mid-stream
+// chunk errors do NOT feed the breaker in v1 (see breaker.ExecuteStream).
+//
+// In cmd/gateway the worker pool wraps this composed func (pool.GuardStream) so
+// the layering is pool → breaker → provider.InferStream, mirroring the unary
+// pool → retry → breaker → provider.
+func (c *Composer) StreamFunc() server.StreamFunc {
+	return func(ctx context.Context, p provider.Provider, req provider.Request) (<-chan provider.Chunk, error) {
+		key := req.Model
+
+		ch, err := c.breakers.ExecuteStream(ctx, key, func(ctx context.Context) (<-chan provider.Chunk, error) {
+			return p.InferStream(ctx, req)
+		})
+		if err == nil {
+			return ch, nil
+		}
+
+		// Open breaker → fast-fail 503 (AC-014a). The server resolves this BEFORE
+		// writing the SSE 200 header, so the client gets a real 503.
+		if IsOpenState(err) {
+			return nil, &Unavailable{
+				Reason:     "breaker_open",
+				retryAfter: c.retryAfter,
+				Err:        err,
+			}
+		}
+
+		// Client cancellation/deadline at initiation → 503 with cancellation info,
+		// consistent with the unary path (AC-020).
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return nil, &Unavailable{
+				Reason:     "deadline",
+				retryAfter: c.retryAfter,
+				Err:        err,
+			}
+		}
+
+		// Any other initiation failure (provider/transport error): propagate so the
+		// server maps it to 502 (mirrors the unary provider-error mapping).
+		return nil, err
+	}
+}

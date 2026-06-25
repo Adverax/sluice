@@ -35,3 +35,58 @@ func (p *Provider) InstrumentInferFunc(next server.InferFunc) server.InferFunc {
 		return resp, err
 	}
 }
+
+// InstrumentStreamFunc wraps a server.StreamFunc so the streaming provider call
+// runs inside a nested span (named "provider.stream"), giving streams the SAME
+// trace coverage as the unary path (CARD-014, NFR-007 parity). The span is a
+// CHILD of the request's root span via the propagated ctx, exactly like the
+// unary variant.
+//
+// The span covers the FULL STREAM LIFETIME: it starts at initiation and ends
+// when the returned channel CLOSES (normal end, ctx cancel, or error), so trace
+// duration reflects the whole stream. An initiation error ends the span
+// immediately with an error status. On success the span ends from the forwarding
+// goroutine when the source drains; that goroutine always terminates (it drains
+// the source to close even if the consumer abandons out), so no goroutine leaks.
+func (p *Provider) InstrumentStreamFunc(next server.StreamFunc) server.StreamFunc {
+	tracer := p.Tracer()
+	return func(ctx context.Context, prov provider.Provider, req provider.Request) (<-chan provider.Chunk, error) {
+		ctx, span := tracer.Start(ctx, "provider.stream")
+		span.SetAttributes(attribute.String("provider.model", req.Model))
+
+		src, err := next(ctx, prov, req)
+		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			span.End()
+			return nil, err
+		}
+
+		out := make(chan provider.Chunk)
+		go func() {
+			defer close(out)
+			defer span.End()
+			for {
+				select {
+				case chunk, ok := <-src:
+					if !ok {
+						return // source drained: span ends via defer.
+					}
+					select {
+					case out <- chunk:
+					case <-ctx.Done():
+						// Consumer abandoned out: drain src to its close so no upstream
+						// goroutine/slot leaks, then end the span via defer.
+						for range src {
+						}
+						return
+					}
+				case <-ctx.Done():
+					for range src {
+					}
+					return
+				}
+			}
+		}()
+		return out, nil
+	}
+}

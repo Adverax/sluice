@@ -81,4 +81,21 @@ ResponseController, ctx cancel aborts upstream) intact (AC-002/008/009 stay gree
 
 ## Worktree notes
 
-—
+**Implemented (CARD-014, branch card/014-streaming-resilience).**
+
+- **Streaming resilience seam.** New `server.StreamFunc` (`func(ctx, provider.Provider, provider.Request) (<-chan provider.Chunk, error)`) is the stream-initiation analogue of `InferFunc`, injected via `server.WithStreamFunc`. Composed in cmd/gateway as **pool → breaker → provider.InferStream**, with **NO retry** (a partially-sent stream cannot be replayed — documented in `resilience.StreamFunc`).
+  - **Breaker guards INITIATION** via new `breaker.(*Registry).ExecuteStream`: opening the stream channel runs through `gobreaker.Execute`, keyed per-provider on the **same registry** as unary. Open → `ErrOpenState` immediately (no provider contact); success counts as a breaker success, init failure as a failure. Client ctx-cancel/deadline at init is NOT counted (mirrors `Execute`). **Mid-stream chunk errors do NOT feed the breaker in v1** (documented in `ExecuteStream`): they arrive after init succeeded; a late blip is a different failure mode.
+  - **Pool slot for streams** via new `pool.(*Pool).GuardStream`: acquires a slot before init (saturation → `ErrPoolSaturated`/`ErrServiceUnavailable`, no goroutine started). On init error the slot is released immediately. On success the slot is held for the stream lifetime and **released exactly once on channel close / ctx cancel / error** — a forwarding goroutine copies src→out, selects on `ctx.Done()` when sending, and **drains src to close** on cancel so the provider goroutine never leaks; a `sync.Once` guards against any double-release.
+  - cmd/gateway uses **one shared `*Pool`** for `Guard` (unary) and `GuardStream` (stream) so bounded concurrency includes streams (NFR-006).
+- **Fast-fail BEFORE 200/SSE bytes.** `streamResponse.VisitCreateChatCompletionResponse` now runs the `StreamFunc` **first** and inspects the init error before writing any byte: `errors.Is(err, ErrServiceUnavailable)` → **503 + Retry-After** as a JSON error; any other init error → **502** JSON error; only on success does it write `Content-Type: text/event-stream` + 200 and forward. No half-open SSE on a resilience reject.
+- **Instrumentation parity.** New `metrics.(*Metrics).InstrumentStreamFunc` records `provider_request_duration_seconds{provider}` over the **full stream lifetime** (observation fires when the channel closes; init error observed immediately). New `tracing.(*Provider).InstrumentStreamFunc` opens a `provider.stream` child span spanning the whole stream, ended on close. Both are channel-forwarding decorators that drain-to-close on cancel (no leak); injected via the existing recorders — pool/breaker import no prometheus/otel.
+- **Wiring.** cmd/gateway: `guardedStream := workerPool.GuardStream(composer.StreamFunc()); instrumentedStream := tracer.InstrumentStreamFunc(met.InstrumentStreamFunc(guardedStream))`, injected via `server.WithStreamFunc`. Existing SSE behavior (per-chunk flush via ResponseController, ctx-cancel aborts upstream, terminal `[DONE]`) unchanged.
+
+**AC → test (all green under `go test -race ./...`):**
+- AC-014a → `TestStream_BreakerOpen_FastFail503` (open breaker → 503+Retry-After, no SSE bytes, InferStream spy not called).
+- AC-014b → `TestStream_PoolSaturated_Returns503` (saturate pool → 503, no stream started, max concurrent never exceeds limit).
+- AC-014c → `TestStream_RecordsProviderMetricAndSpan` (test Prometheus registry + tracetest SpanRecorder observe the metric + `provider.stream` span).
+- AC-014d → `TestStream_PoolSlotReleasedOnEndAndCancel` (slot released on normal completion AND mid-stream cancel; N sequential streams keep `InFlight()==0`).
+- Existing `TestProxy_HappyPath_Streaming` / `_ClientCancel_AbortsUpstream` / `_StreamingClientCancel_AbortsUpstream` stay green.
+
+**Status:** `go build ./...` + `go test -race ./...` green; `go generate ./...` diff-clean (api.gen.go/openapi.yaml untouched); `go mod tidy` no-op; golangci-lint clean on changed packages.

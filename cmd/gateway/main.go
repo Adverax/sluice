@@ -167,7 +167,14 @@ func run() error {
 	// saturated it returns ErrPoolSaturated, which the server maps to 503 +
 	// Retry-After (the same 503 path as the resilience fast-fail). The signature
 	// is unchanged so CARD-005's rate-limit middleware can sit OUTSIDE this layer.
-	guardedInfer := pool.Guard(cfg.WorkerPoolSize, cfg.Breaker.RetryAfter, composer.InferFunc())
+	//
+	// One *Pool instance backs BOTH the unary and the streaming guard so the
+	// concurrency cap is shared across paths (NFR-006: bounded upstream goroutines
+	// must include streams). The streaming guard releases its slot exactly once
+	// when the stream ENDS (channel close / ctx cancel / error) so streams cannot
+	// leak slots (CARD-014, AC-014d).
+	workerPool := pool.New(cfg.WorkerPoolSize, cfg.Breaker.RetryAfter)
+	guardedInfer := workerPool.Guard(composer.InferFunc())
 
 	// Instrument the provider-call seam (COMP-013/COMP-014): time it into
 	// provider_request_duration_seconds and wrap it in a nested OTel span that is
@@ -175,6 +182,17 @@ func run() error {
 	// span covers the metrics timing too; both decorators preserve the InferFunc
 	// signature so the pool→retry→breaker→provider layering is untouched.
 	instrumentedInfer := tracer.InstrumentInferFunc(met.InstrumentInferFunc(guardedInfer))
+
+	// Streaming resilience seam (CARD-014, ADR-0006): pool → breaker →
+	// provider.InferStream, with NO retry (a partially-sent stream cannot be
+	// safely replayed). Stream INITIATION runs through the breaker (open → 503
+	// before any SSE byte, AC-014a) and a shared pool slot (saturation → 503,
+	// AC-014b); the slot releases when the stream ends (AC-014d). The same
+	// instrumentation decorators give streaming provider metric + span parity with
+	// unary (AC-014c) — tracing OUTERMOST so its span spans the full stream
+	// lifetime including the metrics timing.
+	guardedStream := workerPool.GuardStream(composer.StreamFunc())
+	instrumentedStream := tracer.InstrumentStreamFunc(met.InstrumentStreamFunc(guardedStream))
 
 	// Async usage metering (COMP-016/COMP-017/COMP-018, FR-014,
 	// ADR-0005/ADR-0007/ADR-0010). The Usage Buffer is a bounded channel
@@ -201,6 +219,7 @@ func run() error {
 	// (FR-014).
 	srv := server.New(router, healthHandler, logger,
 		server.WithInferFunc(instrumentedInfer),
+		server.WithStreamFunc(instrumentedStream),
 		server.WithMetricsRegistry(promRegistry),
 		server.WithMeteringSink(meteringBuffer),
 	)

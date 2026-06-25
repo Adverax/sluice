@@ -36,6 +36,12 @@ var ErrOpenState = gobreaker.ErrOpenState
 // layers compose (ADR-0006).
 type Call func(ctx context.Context) (provider.Response, error)
 
+// StreamCall is the unit of work the breaker guards on the STREAMING path
+// (CARD-014): a single attempt to INITIATE a provider stream. It MUST honour
+// ctx. Only initiation is guarded — mid-stream chunk errors are delivered on the
+// channel and are NOT fed back to the breaker in v1 (see ExecuteStream).
+type StreamCall func(ctx context.Context) (<-chan provider.Chunk, error)
+
 // Registry holds one gobreaker.CircuitBreaker per provider/model key and builds
 // new ones lazily on first use (FR-007: per-provider breaker). The Router knows
 // the provider names; the composition root keys the breaker by model/provider
@@ -184,4 +190,51 @@ func (r *Registry) Execute(ctx context.Context, key string, call Call) (provider
 		return resp, nil
 	}
 	return provider.Response{}, nil
+}
+
+// ExecuteStream runs a stream-INITIATION call through the breaker keyed by key,
+// guarding ONLY the act of opening the stream (CARD-014). In the open state it
+// returns ErrOpenState immediately without invoking call (fast-fail, AC-014a),
+// so the server can 503 before writing any SSE byte. A successful initiation
+// counts as a breaker SUCCESS; an initiation error counts as a FAILURE, keyed
+// per-provider via the same registry as the unary path (FR-007).
+//
+// Scope (v1, documented): only INITIATION feeds the breaker. Mid-stream chunk
+// errors (provider.Chunk.Err) arrive on the channel AFTER initiation succeeded
+// and are NOT counted as breaker failures — a partial stream cannot be retried
+// and attributing a late transport blip to the breaker would conflate two
+// different failure modes. This mirrors the unary breaker which sees one
+// outcome per call.
+//
+// Client-originated cancellation / deadline at initiation (context.Canceled,
+// context.DeadlineExceeded) is NOT counted as a provider failure, consistent
+// with Execute: a client hanging up before the stream opens must not trip a
+// healthy provider's breaker. Such an error is propagated to the caller
+// unchanged while gobreaker records the attempt as a success.
+func (r *Registry) ExecuteStream(ctx context.Context, key string, call StreamCall) (<-chan provider.Chunk, error) {
+	cb := r.get(key)
+
+	// ctxErr hides a context error from gobreaker's counter (treated as success)
+	// while preserving it for propagation, mirroring Execute.
+	type ctxErr struct{ cause error }
+
+	res, err := cb.Execute(func() (interface{}, error) {
+		ch, callErr := call(ctx)
+		if callErr != nil && (errors.Is(callErr, context.Canceled) || errors.Is(callErr, context.DeadlineExceeded)) {
+			return ctxErr{cause: callErr}, nil
+		}
+		return ch, callErr
+	})
+	if err != nil {
+		// res is nil on ErrOpenState / ErrTooManyRequests; a failed initiation
+		// returns a nil channel with the error.
+		return nil, err
+	}
+	if ce, ok := res.(ctxErr); ok {
+		return nil, ce.cause
+	}
+	if ch, ok := res.(<-chan provider.Chunk); ok {
+		return ch, nil
+	}
+	return nil, nil
 }
