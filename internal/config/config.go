@@ -37,6 +37,11 @@ const (
 
 	defaultWorkerPoolSize = 100
 
+	// defaultCacheTTL is the response-cache entry lifetime (COMP-004, FR-005)
+	// per ADR-0004 (default 5 minutes; overridable per request via the
+	// X-Cache-TTL header). Configurable via GATEWAY_CACHE_TTL (fail-loud).
+	defaultCacheTTL = 5 * time.Minute
+
 	defaultLogLevel  = "info"
 	defaultLogFormat = "json"
 
@@ -176,6 +181,16 @@ type RateLimit struct {
 	MaxKeys int
 }
 
+// Cache holds the response-cache tuning (COMP-004, FR-005) per ADR-0004. The
+// repository (Redis adapter) is wired in cmd/gateway; only the default TTL lives
+// here. The per-request X-Cache-TTL header override is handled in the cache
+// middleware, not config.
+type Cache struct {
+	// TTL is the default cache-entry lifetime applied when a request does not
+	// carry a valid X-Cache-TTL override. Must be > 0.
+	TTL time.Duration
+}
+
 // Config is the fully-resolved service configuration.
 type Config struct {
 	Server    Server
@@ -186,6 +201,7 @@ type Config struct {
 	Retry     Retry
 	Breaker   Breaker
 	RateLimit RateLimit
+	Cache     Cache
 
 	// HealthCheckTimeout is the per-check deadline passed to each individual
 	// readiness checker. Keeping it separate from the Redis/Postgres timeouts
@@ -282,6 +298,9 @@ func Load() (*Config, error) {
 			Window:  mustDuration("GATEWAY_RATELIMIT_WINDOW", defaultRateLimitWindow),
 			MaxKeys: mustPositiveInt("GATEWAY_RATELIMIT_MAX_KEYS", defaultRateLimitMaxKeys),
 		},
+		Cache: Cache{
+			TTL: mustDuration("GATEWAY_CACHE_TTL", defaultCacheTTL),
+		},
 		HealthCheckTimeout: mustDuration("GATEWAY_HEALTH_CHECK_TIMEOUT", defaultHealthCheckTimeout),
 		WorkerPoolSize:     mustPositiveInt("GATEWAY_WORKER_POOL_SIZE", defaultWorkerPoolSize),
 	}
@@ -325,6 +344,7 @@ func (c *Config) Validate() error {
 		{"breaker.Timeout", c.Breaker.Timeout},
 		{"breaker.RetryAfter", c.Breaker.RetryAfter},
 		{"rateLimit.Window", c.RateLimit.Window},
+		{"cache.TTL", c.Cache.TTL},
 	}
 	for _, t := range timeouts {
 		if t.value <= 0 {
