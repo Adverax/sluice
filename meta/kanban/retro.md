@@ -117,3 +117,37 @@ The review caught genuine defects in 5 of 7 cards (not nits), all fixed before m
 
 - Quality: 9.17 → 9.07 (→ stable, high)
 - Cycles: 1.33 → 1.86 (↑ more iterations — expected: Wave 5 was the complex resilience/middleware integration)
+
+## Wave 6 — 2026-06-25
+
+_Final wave: the production-readiness harness (single enabler card)._
+
+### Cards
+
+| Card | Title | Cat | Est | Actual | Cycles | Score | Signal |
+|------|-------|-----|-----|--------|--------|-------|--------|
+| CARD-011 | Load test, race-suite, CI & make up | enabler | 2.5d | 0.1d | 2 | 9.5 | accurate (cycles) |
+
+### Metrics
+
+- cards: 1, escalated: 0, split: 0
+- avg_cycles: 2 (cycle-1 important: make run/up :8080 conflict, fixed)
+- avg_final_score: 9.5, avg_initial_score: 8.5, score_improvement: +1.0
+- No calibration signal (<2 cards). No capacity drift (no explicit capacity; single enabler).
+- Integration suite (testcontainers, real Postgres+Redis) ran live and green.
+
+### Trend vs Wave 5
+
+- Quality: 9.07 → 9.5 (↑)
+- Cycles: 1.86 → 2.0 (≈ stable)
+
+---
+
+## Project complete — all-waves summary (2026-06-25)
+
+- Waves: 6 · cards done: 12/12 · escalated: 0 · splits: 0
+- Avg review score: 9.13 (Wave 1 9.0 → W2–4 9.17 → W5 9.07 → W6 9.5)
+- Avg review cycles: 1.6 — 5 of 12 cards needed a fix cycle
+- golang-pro: calibrated throughout (no effort adjustment warranted)
+- The severity gate caught a real defect in ~40% of cards (DoS, auth bypass, body corruption, billing data-loss, metric cardinality) — all fixed before merge.
+- Process note: OpenAPI-first pivot mid-build (ADR-0011, +CARD-012) was the one structural change; cheap CARD-003 restart, net quality gain.
