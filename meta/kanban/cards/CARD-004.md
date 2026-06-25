@@ -1,6 +1,6 @@
 # CARD-004: SSE streaming & context cancellation
 
-**Status:** ready
+**Status:** done
 **Priority:** P1
 **Category:** feature
 **Estimate:** 2d
@@ -11,11 +11,11 @@
 **Worktree:** —
 **Source:** meta/architecture/handoff.md#increment-2
 **Depends on:** CARD-003
-**Review score:** —
-**Started:** —
-**Closed:** —
-**Actual:** —
-**Merge commit:** —
+**Review score:** 9.0 (1 cycle; 0 critical/important; AC-002/008/009 ✓)
+**Started:** 2026-06-25T11:11:49Z
+**Closed:** 2026-06-25T11:22:36Z
+**Actual:** 0.1d
+**Merge commit:** 9f09517
 **Blocked by:** —
 
 ## What to implement
