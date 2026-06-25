@@ -36,3 +36,39 @@ score as the quality signals instead. No calibration signal emitted (also < 2 ca
   Final cycle: score 9.0, zero critical/important, AC gate all ✓.
 - Process note: the first merge attempt was blocked by uncommitted board/card tracking edits in
   the main checkout; recovered by discarding them and re-merging. dispatcher.state since gitignored.
+
+## Waves 2–4 — 2026-06-25
+
+_Single-card waves, retro'd together (first retro since Wave 1)._
+
+### Cards
+
+| Card | Title | Cat | Est | Actual | Accuracy | Cycles | Score | Signal |
+|------|-------|-----|-----|--------|----------|--------|-------|--------|
+| CARD-002 | Provider interface & mock | feature | 1.5d | 0.1d | 0.07× | 1 | 9.0 | simpler (cycles; accuracy distorted) |
+| CARD-012 | OpenAPI contract & codegen | enabler | 1d | 0.1d | 0.10× | 1 | 9.5 | simpler (cycles; accuracy distorted) |
+| CARD-003 | Non-stream proxy, router, health | feature | 2.5d | 0.1d | 0.04× | 2 | 9.0 | accurate (cycles; accuracy distorted) |
+
+### Metrics
+
+- cards: 3, escalated: 0, split: 0
+- avg_cycles: 1.33 (cycles proxy; CARD-003 needed 2 for the OpenAPI-validation Important)
+- avg_final_score: 9.17, avg_initial_score: 9.0, score_improvement: +0.17
+- accuracy: invalid signal (AI wall-clock vs human-day estimate — same caveat as Wave 1); calibration uses cycles proxy
+
+### Calibration signals
+
+- golang-pro (3 cards, avg_cycles 1.33, proxy) → calibrated (no change; within 1.3–2.5 band)
+
+### Capacity vs plan
+
+- skipped — no explicit `capacity:` in meta/.skills.yml (derived from early-mvp stage)
+
+### Process shortcuts
+
+- other:openapi_first_pivot → rework (MINOR) — mid-build switch to OpenAPI-first (ADR-0011) added CARD-012 and restarted CARD-003; the restart was cheap (first agent had barely begun). Net: a quality improvement, not a corner cut.
+
+### Trend vs Wave 1
+
+- Quality: 9.0 → 9.17 (stable, high)
+- Cycles: 3.0 → 1.33 (↑ fewer iterations — bootstrap was the cycle-heavy one)
