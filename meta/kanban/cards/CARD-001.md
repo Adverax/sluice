@@ -78,4 +78,23 @@ ADR-0008: all observability hooks (logger, registry) are injected, not global si
 
 ## Worktree notes
 
-—
+Implemented the bootable service skeleton (stdlib-only, no new deps; `go.mod` unchanged).
+
+Packages/files:
+- `internal/config/config.go` — env-based load with defaults + `Validate()`; asserts the 6 AC-045 boundary timeouts (http.Server Read/Write/Idle, upstream client, Redis dial/read, pgx acquire) are all > 0. GATEWAY_ prefix per ADR-0003.
+- `internal/logging/logging.go` + `middleware.go` — injected `*slog.Logger` (JSON/text), per-request middleware emitting `request_id`/`latency_ms`/`status_code` at INFO; `LogPanic` records panics at ERROR with `panic_value` (the logging side of AC-041; recovery-as-500 middleware is CARD-009 — middleware re-raises the panic).
+- `internal/health/health.go` — `Checker` port + `Handler` with `/healthz` (FR-008) and `/readyz` (FR-009 framework): 503 when any registered checker is unhealthy; CARD-003 registers real Redis/Postgres checkers.
+- `internal/lifecycle/lifecycle.go` — COMP-006 Manager: timeout-bearing `http.Server`, `CountingMiddleware` for in-flight tracking, `Run(ctx)` → on ctx cancel does `server.Shutdown`, logs `"drained N requests"`, returns nil (exit 0).
+- `cmd/gateway/main.go` — DI wiring (config → logger → health → server → manager → `signal.NotifyContext(SIGINT/SIGTERM)`). No global singletons (ADR-0008).
+
+AC coverage:
+- AC-045 (NFR-004) → `TestConfig_AllBoundariesHaveTimeouts` (asserts every timeout > 0).
+- AC-040 (FR-016) → `TestLogging_StructuredFieldsPresent`.
+- AC-041 (FR-016) → `TestLogging_PanicLoggedAtError` (+ `TestLogPanic_DirectUse`).
+- AC-031 (FR-012) → `TestGracefulShutdown_DrainsInFlightRequests` (5 reqs @200ms).
+- AC-046 (NFR-005) → `TestGracefulShutdown_ZeroDropped` (10 reqs @300ms, exit 0, "drained 10 requests").
+- FR-009 readiness 503 → `TestReady_DependencyUnhealthy_503`.
+
+`go build ./...`, `go vet ./...`, `go test -race ./...` all green. No [BLOCKER].
+
+Scope: proxy/provider/rate-limit/cache/breaker/metering/metrics intentionally NOT implemented (later cards). `WorkerPoolSize` is loaded but the pool is CARD-008.

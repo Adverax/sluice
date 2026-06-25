@@ -1,0 +1,113 @@
+version: 1
+generated_at: "2026-06-25T07:40:30Z"
+target: "card/001-service-bootstrap-lifecycle (cycle 3/3)"
+overall_score: 9.0
+risk_level: low
+review_lane: fast
+reviewer: forge:review
+
+coverage:
+  read:
+    - cmd/gateway/main.go
+    - internal/config/config.go
+    - internal/config/config_test.go
+    - internal/health/health.go
+    - internal/health/health_test.go
+    - internal/lifecycle/lifecycle.go
+    - internal/lifecycle/lifecycle_test.go
+    - internal/logging/logging.go
+    - internal/logging/logging_test.go
+    - internal/logging/middleware.go
+  not_reached: []
+  confidence: high
+
+metrics:
+  diff: { files: 10, added: 0, removed: 0 }   # single squashed feat commit; full-file review
+  tests_cover_change: true
+  hotspots: []
+  cochange_missing: []
+
+prev_cycle_verification:
+  - id: "AC-046/AC-031 through Run()"
+    status: resolved
+    evidence: "lifecycle_test.go:39-131 drainScenario launches mgr.Run(ctx) (line 61) and cancels ctx after all n in-flight (line 104); both AC-031 n=5 and AC-046 n=10 call it (lines 140-149)."
+  - id: "arrived counter removed"
+    status: partial
+    evidence: "drainScenario has no arrived counter. But duplicate test TestRun_DrainInFlightRequests_EndToEnd still declares/increments an unused 'arrived' (lifecycle_test.go:207,209)."
+  - id: "probes excluded from CountingMiddleware"
+    status: resolved
+    evidence: "main.go:66-69 mounts /healthz,/readyz on outerMux directly; only appMux is wrapped by CountingMiddleware."
+
+root_causes: []
+
+findings:
+  - id: F-001
+    severity: low
+    category: tech-debt
+    type: gap
+    file: internal/lifecycle/lifecycle_test.go
+    line: 198
+    title: "TestRun_DrainInFlightRequests_EndToEnd duplicates drainScenario; carries unused 'arrived' counter"
+    description: |
+      TestRun_DrainInFlightRequests_EndToEnd (lines 198-293) is a near-verbatim
+      copy of drainScenario(t,5,200ms) which AC-031 already exercises. It also
+      declares and increments `arrived` (lines 207,209) but never asserts it —
+      dead instrumentation. The cycle-2 fix note claimed the unused arrived
+      counter was removed; it was removed from drainScenario but remains in this
+      duplicate test.
+    suggestion: |
+      Delete TestRun_DrainInFlightRequests_EndToEnd (drainScenario covers the
+      identical Run->cancel->drain path) or, if kept for explicitness, drop the
+      unused `arrived` counter.
+    confidence: high
+    source: static
+    root_cause: null
+    status: open
+    fixed_in: null
+    dismissed_reason: null
+  - id: F-002
+    severity: low
+    category: tech-debt
+    type: risk
+    file: internal/lifecycle/lifecycle.go
+    line: 88
+    title: "Drain count is a start-of-shutdown snapshot, not a true drained tally"
+    description: |
+      `draining` samples inFlight once at the top of shutdown() and logs it as
+      both "drained N" and the in_flight attr. After server.Shutdown completes
+      the actual number that finished may differ if any request errored out or
+      if the drain hit the shutdownTimeout (forced close). The "drained N" line
+      would then overstate completions. AC-046 passes because all 10 are
+      confirmed in-flight before cancel and latency < shutdownTimeout, but the
+      message semantics ("requests actually drained") are not guaranteed on the
+      timeout/forced-close path.
+    suggestion: |
+      Either reword the log to "draining N in-flight requests" (honest about
+      being a snapshot), or on Shutdown timeout log the residual
+      atomic.LoadInt64(&m.inFlight) as not-drained so the count cannot overstate.
+    confidence: medium
+    source: static
+    root_cause: null
+    status: open
+    fixed_in: null
+    dismissed_reason: null
+  - id: F-003
+    severity: info
+    category: tech-debt
+    type: question
+    file: internal/logging/middleware.go
+    line: 27
+    title: "statusRecorder implements Flusher but not Hijacker/ReaderFrom"
+    description: |
+      statusRecorder wraps ResponseWriter and forwards Flush, but not Hijack or
+      ReadFrom. For the bootstrap card there is no streaming/websocket/proxy
+      handler, so this is correct now; it will need Hijacker once CARD-002 proxy
+      lands. Noted for follow-up, not a current defect.
+    suggestion: |
+      Add http.Hijacker pass-through when the proxy handler is introduced.
+    confidence: high
+    source: inferred
+    root_cause: null
+    status: open
+    fixed_in: null
+    dismissed_reason: null
