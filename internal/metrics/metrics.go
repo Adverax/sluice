@@ -34,6 +34,11 @@ type Recorder interface {
 	// metering package depends on the narrower metering.DropRecorder port, which
 	// *Metrics also satisfies, so it never imports Prometheus (ADR-0008).
 	IncMeteringEventsDropped()
+	// SetMeteringBufferSize records the current Usage-buffer occupancy
+	// (metering_buffer_size). The metering worker publishes this each loop tick
+	// through the narrower metering.BufferSizeRecorder port, which *Metrics also
+	// satisfies, so the metering package never imports Prometheus (ADR-0008).
+	SetMeteringBufferSize(n int)
 }
 
 // Breaker state gauge values (breaker_state). Stable numeric encoding so the
@@ -69,6 +74,10 @@ type Metrics struct {
 	// MeteringEventsDropped counts usage events dropped by the metering buffer
 	// when it is full (metering_events_dropped_total, COMP-016 / AC-036).
 	MeteringEventsDropped prometheus.Counter
+	// MeteringBufferSize is the current Usage-buffer occupancy gauge
+	// (metering_buffer_size, COMP-016 / NFR-007). The metering worker sets it each
+	// loop tick from Buffer.Len().
+	MeteringBufferSize prometheus.Gauge
 }
 
 // New registers the six required metrics against reg and returns the handle.
@@ -110,6 +119,10 @@ func New(reg *prometheus.Registry) *Metrics {
 			Name: "metering_events_dropped_total",
 			Help: "Total number of usage events dropped because the metering buffer was full.",
 		}),
+		MeteringBufferSize: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "metering_buffer_size",
+			Help: "Current number of usage events buffered awaiting persistence.",
+		}),
 	}
 }
 
@@ -128,6 +141,9 @@ func (m *Metrics) SetBreakerState(provider string, state float64) {
 // IncMeteringEventsDropped implements Recorder.
 func (m *Metrics) IncMeteringEventsDropped() { m.MeteringEventsDropped.Inc() }
 
+// SetMeteringBufferSize implements Recorder.
+func (m *Metrics) SetMeteringBufferSize(n int) { m.MeteringBufferSize.Set(float64(n)) }
+
 // Compile-time proof *Metrics satisfies the Recorder port.
 var _ Recorder = (*Metrics)(nil)
 
@@ -144,5 +160,8 @@ func (NopRecorder) SetBreakerState(string, float64) {}
 
 // IncMeteringEventsDropped implements Recorder (no-op).
 func (NopRecorder) IncMeteringEventsDropped() {}
+
+// SetMeteringBufferSize implements Recorder (no-op).
+func (NopRecorder) SetMeteringBufferSize(int) {}
 
 var _ Recorder = NopRecorder{}

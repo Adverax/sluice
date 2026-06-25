@@ -209,6 +209,10 @@ func run() error {
 	meteringRepo := metering.NewPgxRepository(pgPool)
 	meteringWorker := metering.NewWorker(meteringBuffer, meteringRepo, logger,
 		metering.WithFlushInterval(cfg.Metering.FlushInterval),
+		// Publish the Usage-buffer occupancy as metering_buffer_size each loop
+		// tick via the injected recorder (metering never imports Prometheus,
+		// ADR-0008).
+		metering.WithBufferSizeRecorder(met),
 	)
 	meteringWorker.Start()
 
@@ -238,6 +242,9 @@ func run() error {
 		// independent deadline so a forced HTTP drain does not starve the flush
 		// (GATEWAY_SHUTDOWN_HOOK_TIMEOUT, default 5s — AC-032 / FR-012).
 		lifecycle.WithHookTimeout(cfg.Shutdown.HookTimeout),
+		// After the shutdown hooks run, log the number of usage events flushed
+		// during shutdown alongside "drained N requests" (AC-015c).
+		lifecycle.WithFlushedCountFn(meteringWorker.FlushedOnShutdown),
 	)
 
 	// Flush remaining buffered usage events on shutdown, AFTER the HTTP drain so
@@ -263,7 +270,12 @@ func run() error {
 		ratelimit.WithMaxKeys(cfg.RateLimit.MaxKeys),
 	)
 	defer rlRegistry.Close()
-	rlRepo := ratelimit.NewRedisRepository(redisClient)
+	// The distributed tier is a Redis token bucket (spec: "token bucket … +
+	// Redis"): RPS is the refill rate and Burst the bucket capacity, reusing the
+	// same GATEWAY_RATELIMIT_RPS/BURST knobs as the local tier (ADR-0010).
+	rlRepo := ratelimit.NewRedisRepository(redisClient,
+		ratelimit.WithBurst(cfg.RateLimit.Burst),
+	)
 	rateLimiter := middleware.NewRateLimiter(
 		rlRegistry, rlRepo, cfg.RateLimit.RPS, cfg.RateLimit.Window, logger,
 		// ratelimit_rejected_total is incremented at the 429 reject path via the

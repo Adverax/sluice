@@ -38,6 +38,13 @@ type Manager struct {
 	// is registered here so remaining buffered usage events are flushed before
 	// exit (AC-032 / FR-012).
 	onShutdown []func(context.Context) error
+
+	// flushedCountFn, when set, is read AFTER the shutdown hooks have run and
+	// supplies the number of buffered usage events flushed during shutdown. The
+	// count is logged alongside "drained N requests" so the operator sees both the
+	// drained in-flight requests AND the flushed metering events (AC-015c). It is
+	// optional: when nil, the shutdown log omits the flushed count.
+	flushedCountFn func() int
 }
 
 // Option configures a Manager (functional options).
@@ -52,6 +59,19 @@ func WithHookTimeout(d time.Duration) Option {
 	return func(m *Manager) {
 		if d > 0 {
 			m.hookTimeout = d
+		}
+	}
+}
+
+// WithFlushedCountFn registers a function read AFTER the shutdown hooks have run
+// to obtain the number of buffered usage events flushed during shutdown. The
+// count is logged alongside "drained N requests" (AC-015c). The metering
+// worker's FlushedOnShutdown is wired here in cmd/gateway. A nil function is
+// ignored (the flushed count is then omitted from the log).
+func WithFlushedCountFn(fn func() int) Option {
+	return func(m *Manager) {
+		if fn != nil {
+			m.flushedCountFn = fn
 		}
 	}
 }
@@ -153,15 +173,18 @@ func (m *Manager) shutdown() error {
 	defer cancel()
 
 	var shutdownErr error
+	drained := draining // count of requests that drained cleanly (0 on the error path)
 	if err := m.server.Shutdown(shutdownCtx); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			// Forced shutdown: in-flight requests did not drain in time (AC-051).
 			// Log the count of unfinished requests; do not fail the process exit.
 			unfinished := atomic.LoadInt64(&m.inFlight)
+			drained = draining - unfinished
 			m.logger.LogAttrs(context.Background(), slog.LevelWarn,
 				fmt.Sprintf("forced shutdown: %d requests unfinished", unfinished),
 				slog.Int64("unfinished", unfinished))
 		} else {
+			drained = 0
 			m.logger.LogAttrs(context.Background(), slog.LevelError, "graceful shutdown failed",
 				slog.String("error", err.Error()),
 				slog.Int64("in_flight", atomic.LoadInt64(&m.inFlight)))
@@ -188,6 +211,18 @@ func (m *Manager) shutdown() error {
 				shutdownErr = fmt.Errorf("shutdown hook: %w", err)
 			}
 		}
+	}
+
+	// After the hooks have run (so the metering worker's Close has flushed),
+	// report both signals on one line: the drained in-flight requests AND the
+	// usage events flushed during shutdown (AC-015c). The flushed count is read
+	// here, post-hooks, because the metering worker only knows it after Close.
+	if m.flushedCountFn != nil {
+		flushed := m.flushedCountFn()
+		m.logger.LogAttrs(context.Background(), slog.LevelInfo,
+			fmt.Sprintf("shutdown complete: drained %d requests, flushed %d usage events", drained, flushed),
+			slog.Int64("drained", drained),
+			slog.Int("flushed_usage_events", flushed))
 	}
 
 	return shutdownErr

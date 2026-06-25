@@ -120,6 +120,26 @@ func TestMetrics_ExposesRequiredMetrics(t *testing.T) {
 	}
 }
 
+// TestMetrics_MeteringBufferSizePresent covers AC-015b (NFR-007): the
+// metering_buffer_size gauge is registered on the injected registry and appears
+// in the GET /metrics exposition. The gauge is exported as soon as it is
+// registered (Prometheus gauges have an initial value of 0), so it is present
+// even before the worker first publishes an occupancy.
+func TestMetrics_MeteringBufferSizePresent(t *testing.T) {
+	t.Parallel()
+
+	h, met := newGateway(t)
+	// Set a non-zero occupancy through the Recorder port (as the metering worker
+	// does) to prove the value is wired, then scrape.
+	met.SetMeteringBufferSize(7)
+
+	out := scrapeMetrics(t, h)
+
+	if !strings.Contains(out, "metering_buffer_size") {
+		t.Errorf("GET /metrics output missing metering_buffer_size gauge\noutput:\n%s", out)
+	}
+}
+
 // TestMetrics_AllSixMetricsPresent covers AC-048 (NFR-007): all six required
 // metrics are present in the exposition.
 func TestMetrics_AllSixMetricsPresent(t *testing.T) {

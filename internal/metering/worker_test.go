@@ -196,6 +196,12 @@ func TestGracefulShutdown_FlushesMetering(t *testing.T) {
 	if got := repo.count(); got != n {
 		t.Errorf("flushed %d events on shutdown, want %d", got, n)
 	}
+
+	// FlushedOnShutdown must report the count flushed during the drain so the
+	// lifecycle can log "flushed M usage events" (AC-015c).
+	if got := w.FlushedOnShutdown(); got != n {
+		t.Errorf("FlushedOnShutdown() = %d, want %d", got, n)
+	}
 }
 
 // TestWorker_NoGoroutineLeak asserts Close is idempotent and the worker stops

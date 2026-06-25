@@ -3,6 +3,7 @@ package metering
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,9 +33,16 @@ const (
 // remainder before returning, so no buffered event is lost on graceful shutdown
 // (AC-032 / FR-012).
 type Worker struct {
+	buf    *Buffer
 	events <-chan UsageEvent
 	repo   MeteringRepository
 	logger *slog.Logger
+
+	// bufRecorder publishes the current buffer occupancy as the
+	// metering_buffer_size gauge. It is updated each loop tick (and after every
+	// enqueue/flush) from buf.Len(). The worker depends only on this narrow port,
+	// so the metering package never imports Prometheus (ADR-0008).
+	bufRecorder BufferSizeRecorder
 
 	batchSize     int
 	flushInterval time.Duration
@@ -47,6 +55,13 @@ type Worker struct {
 	done chan struct{}
 	// stop signals the run loop to drain-and-exit.
 	stop chan struct{}
+
+	// shutdownFlushed counts the usage events successfully persisted during the
+	// graceful-shutdown drain (the stop path). It is read by the lifecycle log so
+	// the operator sees "flushed M usage events" alongside "drained N requests"
+	// (AC-015c). Written only in the worker goroutine, read after w.done closes,
+	// but kept atomic for safety.
+	shutdownFlushed int64
 }
 
 // WorkerOption configures a Worker (functional options, CON-001).
@@ -101,13 +116,26 @@ func WithRetryBackoff(d time.Duration) WorkerOption {
 	}
 }
 
+// WithBufferSizeRecorder injects the recorder the worker uses to publish the
+// metering_buffer_size gauge. A nil recorder is ignored (the worker keeps its
+// no-op default), so the metering package never imports Prometheus (ADR-0008).
+func WithBufferSizeRecorder(rec BufferSizeRecorder) WorkerOption {
+	return func(w *Worker) {
+		if rec != nil {
+			w.bufRecorder = rec
+		}
+	}
+}
+
 // NewWorker constructs the Metering Worker reading from buf and flushing through
 // repo. The worker does not start until Start is called.
 func NewWorker(buf *Buffer, repo MeteringRepository, logger *slog.Logger, opts ...WorkerOption) *Worker {
 	w := &Worker{
+		buf:           buf,
 		events:        buf.Events(),
 		repo:          repo,
 		logger:        logger,
+		bufRecorder:   NopBufferSizeRecorder{},
 		batchSize:     defaultBatchSize,
 		flushInterval: defaultFlushInterval,
 		flushTimeout:  defaultFlushTimeout,
@@ -145,7 +173,11 @@ func (w *Worker) run() {
 		}
 		w.flush(batch)
 		batch = batch[:0]
+		w.publishBufferSize()
 	}
+
+	// Publish the initial (empty) occupancy so the gauge exists from the start.
+	w.publishBufferSize()
 
 	for {
 		select {
@@ -157,48 +189,66 @@ func (w *Worker) run() {
 				return
 			}
 			batch = append(batch, e)
+			// One event left the buffer for the in-memory batch; reflect the new
+			// occupancy in the gauge.
+			w.publishBufferSize()
 			if len(batch) >= w.batchSize {
 				flush()
 			}
 		case <-ticker.C:
+			w.publishBufferSize()
 			flush()
 		case <-w.stop:
 			// Graceful shutdown: flush the current batch, then drain whatever is
 			// still buffered (events enqueued before Close) and flush it too, so
 			// nothing buffered is lost (AC-032). The hot path is already closed
-			// (HTTP drained) before Close is called, so no new events arrive.
-			flush()
-			w.drain()
+			// (HTTP drained) before Close is called, so no new events arrive. Count
+			// the events persisted so the lifecycle can log "flushed M usage events"
+			// alongside "drained N requests" (AC-015c).
+			flushed := w.flush(batch)
+			flushed += w.drain()
+			atomic.StoreInt64(&w.shutdownFlushed, int64(flushed))
+			w.publishBufferSize()
 			return
 		}
 	}
 }
 
+// publishBufferSize reports the current Usage-buffer occupancy to the injected
+// recorder (metering_buffer_size). It is called each loop tick and after every
+// dequeue/flush so the gauge tracks how full the buffer is at any moment. The
+// read is cheap (len of a channel) and never blocks the worker.
+func (w *Worker) publishBufferSize() {
+	w.bufRecorder.SetMeteringBufferSize(w.buf.Len())
+}
+
 // drain empties the buffer channel and flushes the remaining events in
 // batch-sized chunks. It is called once, on stop, after the in-flight batch has
 // been flushed. The hot path is already drained by the time Close runs, so this
-// is a non-racy "read everything currently buffered" pass.
-func (w *Worker) drain() {
+// is a non-racy "read everything currently buffered" pass. It returns the number
+// of events successfully persisted so the shutdown path can report the total.
+func (w *Worker) drain() int {
+	flushed := 0
 	batch := make([]UsageEvent, 0, w.batchSize)
 	for {
 		select {
 		case e, ok := <-w.events:
 			if !ok {
 				if len(batch) > 0 {
-					w.flush(batch)
+					flushed += w.flush(batch)
 				}
-				return
+				return flushed
 			}
 			batch = append(batch, e)
 			if len(batch) >= w.batchSize {
-				w.flush(batch)
+				flushed += w.flush(batch)
 				batch = batch[:0]
 			}
 		default:
 			if len(batch) > 0 {
-				w.flush(batch)
+				flushed += w.flush(batch)
 			}
-			return
+			return flushed
 		}
 	}
 }
@@ -207,8 +257,9 @@ func (w *Worker) drain() {
 // it logs and retries up to flushRetries times, then logs a final drop. The
 // batch is NEVER silently lost — every failure path emits a log line. This all
 // runs in the worker goroutine, so the hot path is never blocked even when
-// Postgres is down.
-func (w *Worker) flush(batch []UsageEvent) {
+// Postgres is down. It returns the number of events persisted (len(batch) on
+// success, 0 when the batch was dropped after exhausting retries).
+func (w *Worker) flush(batch []UsageEvent) int {
 	// Copy the slice so the caller can safely reuse its backing array; the
 	// repository may hold the slice for the duration of the call.
 	events := make([]UsageEvent, len(batch))
@@ -223,7 +274,7 @@ func (w *Worker) flush(batch []UsageEvent) {
 		err := w.repo.Flush(ctx, events)
 		cancel()
 		if err == nil {
-			return
+			return len(events)
 		}
 		lastErr = err
 		w.logger.LogAttrs(context.Background(), slog.LevelError, "metering flush failed",
@@ -240,6 +291,7 @@ func (w *Worker) flush(batch []UsageEvent) {
 		slog.Int("batch_size", len(events)),
 		slog.String("error", lastErr.Error()),
 	)
+	return 0
 }
 
 // Close stops the worker, draining and flushing all buffered events before
@@ -266,4 +318,13 @@ func (w *Worker) Close(ctx context.Context) error {
 		)
 		return ctx.Err()
 	}
+}
+
+// FlushedOnShutdown returns the number of usage events successfully persisted
+// during the graceful-shutdown drain. It is meaningful only after Close has
+// returned (the worker has stopped); the lifecycle logs it alongside "drained N
+// requests" so the operator sees how many buffered events survived shutdown
+// (AC-015c).
+func (w *Worker) FlushedOnShutdown() int {
+	return int(atomic.LoadInt64(&w.shutdownFlushed))
 }

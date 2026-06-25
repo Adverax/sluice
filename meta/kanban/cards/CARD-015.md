@@ -72,4 +72,45 @@ All three are independent; keep them cohesive but small. Do not regress existing
 
 ## Worktree notes
 
-—
+Implemented all three conformance items on branch `card/015-conformance-tweaks`.
+
+**Item 1 — Redis token bucket (`internal/ratelimit/redisrepo.go`).** Replaced the
+fixed-window `INCR+PEXPIRE+PTTL` Lua with an atomic token-bucket script: per key it
+stores a hash `{tokens, ts}`, refills `tokens = min(burst, tokens + elapsed_s·rate)`
+against a `now_ms` passed from Go (deterministic/testable, NTP-synced-clock trade-off
+noted in the script doc), allows iff `tokens >= 1` (decrement), persists with a TTL of
+5× the window, and returns `{allowed, retry_after_ms}`. Read-refill-decrement-persist is
+one Lua call → no read-modify-write race (ADR-0010). Interface unchanged: `rate =
+limit/window`; `burst` injected via the new `WithBurst` option (reuses
+`GATEWAY_RATELIMIT_BURST`, wired in `cmd/gateway`), defaulting to `limit`. Clock injected
+via `WithRedisClock` (named distinctly from the Registry's `WithClock`). Tests: the fake
+scripter now emulates the token-bucket math exactly; added `TestRateLimit_DistributedTokenBucket`
+(two repos sharing one fake store → no more than `burst` immediate, then steady-state
+rate, capped), `TestRedisRepository_TokenBucket`, `TestRedisRepository_SteadyStateRate`.
+The integration test `TestIntegration_RateLimitRedisDistributed` was rewritten to the
+token bucket against REAL Redis using a shared injected clock (no real sleeps): phase 1
+asserts exactly `burst` admitted across two instances, phase 2 advances the clock one
+window and asserts `0 < allowed <= burst`. Integration run: **PASS** (0.83s, real Redis
+via testcontainers).
+
+**Item 2 — `metering_buffer_size` gauge.** Added the gauge to `internal/metrics` on the
+injected registry (`promauto.With(reg)`); extended the `Recorder` interface (and
+`NopRecorder`) with `SetMeteringBufferSize(int)`. metering does NOT import Prometheus
+(verified via `go list -deps`): added a narrow `BufferSizeRecorder` port + `NopBufferSizeRecorder`;
+the worker holds the `*Buffer` and publishes `buf.Len()` each loop tick (and after every
+dequeue/flush) via `WithBufferSizeRecorder(met)` (wired in `cmd/gateway`). Exposed at
+`/metrics` (same registry). Test: `TestMetrics_MeteringBufferSizePresent`.
+
+**Item 3 — shutdown logs drained + flushed.** The worker now counts events successfully
+persisted during the stop-path drain (`flush`/`drain` return counts) and exposes
+`FlushedOnShutdown() int`. Lifecycle gained `WithFlushedCountFn(func() int)`, read AFTER
+the shutdown hooks run, and logs `"shutdown complete: drained N requests, flushed M usage
+events"` alongside the existing (intact) `"drained N requests"` and forced-shutdown lines.
+Wired in `cmd/gateway` to `meteringWorker.FlushedOnShutdown`. Tests:
+`TestGracefulShutdown_LogsDrainedAndFlushed` (lifecycle) + `FlushedOnShutdown` assertion
+in `TestGracefulShutdown_FlushesMetering` (metering).
+
+**Gates:** `go build ./...` ✓ · `go test -race ./...` ✓ (all packages green) ·
+`go test -tags=integration -race -p 1 ./internal/integration/` ✓ · `go generate ./...`
+diff-clean (no `api.gen.go`/`openapi.yaml` changes) ✓ · `golangci-lint run` clean ✓ ·
+`go mod tidy` no-op ✓.

@@ -64,6 +64,26 @@ func (NopDropRecorder) IncMeteringEventsDropped() {}
 
 var _ DropRecorder = NopDropRecorder{}
 
+// BufferSizeRecorder is the narrow metrics port the Metering Worker depends on
+// to publish the current Usage-buffer occupancy as the metering_buffer_size
+// gauge WITHOUT importing Prometheus (ADR-0008 boundary hygiene; mirrors
+// DropRecorder). *metrics.Metrics satisfies it; NopBufferSizeRecorder lets the
+// worker stay un-instrumented in tests.
+type BufferSizeRecorder interface {
+	// SetMeteringBufferSize records the number of events currently buffered in
+	// the Usage Buffer (metering_buffer_size).
+	SetMeteringBufferSize(n int)
+}
+
+// NopBufferSizeRecorder is a BufferSizeRecorder that discards every signal, so
+// the worker never needs a nil check.
+type NopBufferSizeRecorder struct{}
+
+// SetMeteringBufferSize implements BufferSizeRecorder (no-op).
+func (NopBufferSizeRecorder) SetMeteringBufferSize(int) {}
+
+var _ BufferSizeRecorder = NopBufferSizeRecorder{}
+
 // Sink is the port the server depends on to record usage. It is intentionally
 // one method so the server never sees the buffer/worker machinery and the hot
 // path stays trivially non-blocking. *Buffer satisfies it; a NopSink lets the
