@@ -5,11 +5,11 @@
 
 ---
 
-## Ready (9)
+## Ready (8)
 
 | CARD | Title | Status | Pri | Cat | Est | Depends | Skill |
 |------|-------|--------|-----|-----|-----|---------|-------|
-| CARD-003 | Non-streaming proxy, router, health & timeouts | ready | P1 | feature | 2.5d | CARD-002 ✓, CARD-012 | golang-pro |
+| CARD-003 | Non-streaming proxy, router, health & timeouts | ready | P1 | feature | 2.5d | CARD-002 ✓, CARD-012 ✓ | golang-pro |
 | CARD-004 | SSE streaming & context cancellation | ready | P1 | feature | 2d | CARD-003 | golang-pro |
 | CARD-005 | Per-key rate limiting (local→Redis) + ephemeral key | ready | P1 | feature | 2.5d | CARD-003 | golang-pro |
 | CARD-006 | Response cache (Redis, TTL + per-request override) | ready | P2 | feature | 1.5d | CARD-003 | golang-pro |
@@ -21,11 +21,9 @@
 
 ---
 
-## In Progress (1)
+## In Progress (0)
 
-| CARD | Title | Phase | Pri | Est | Branch |
-|------|-------|-------|-----|-----|--------|
-| CARD-012 | OpenAPI contract & codegen scaffolding | implementation | P1 | 1d | card/012-openapi-contract-codegen |
+_none_
 
 ---
 
@@ -35,12 +33,13 @@ _none_
 
 ---
 
-## Done (2)
+## Done (3)
 
 | CARD | Title | Pri | Score | Actual | Merge |
 |------|-------|-----|-------|--------|-------|
 | CARD-001 | Service bootstrap & lifecycle | P1 | 9.0 | 0.1d | 9638bf7 |
 | CARD-002 | Provider interface & mock | P1 | 9.0 | 0.1d | e2f2af9 |
+| CARD-012 | OpenAPI contract & codegen scaffolding | P1 | 9.5 | 0.1d | 4fa2d54 |
 
 ---
 

@@ -1,6 +1,6 @@
 # CARD-012: OpenAPI contract & codegen scaffolding
 
-**Status:** ready
+**Status:** done
 **Priority:** P1
 **Category:** enabler
 **Estimate:** 1d
@@ -11,11 +11,11 @@
 **Worktree:** —
 **Source:** ADR-0011
 **Depends on:** CARD-002
-**Review score:** —
-**Started:** —
-**Closed:** —
-**Actual:** —
-**Merge commit:** —
+**Review score:** 9.5 (1 cycle; 0 critical/important; AC-G1/G2 ✓; go.mod→1.25 per kin-openapi)
+**Started:** 2026-06-25T08:23:07Z
+**Closed:** 2026-06-25T08:36:47Z
+**Actual:** 0.1d
+**Merge commit:** 4fa2d54
 **Blocked by:** —
 
 ## What to implement
