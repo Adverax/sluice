@@ -6,6 +6,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -23,6 +24,13 @@ const (
 	defaultShutdownTimeout = 30 * time.Second
 
 	defaultUpstreamTimeout = 30 * time.Second
+
+	// defaultMockUpstreamAddr is the listen address for the IN-PROCESS mock LLM
+	// upstream started when GATEWAY_UPSTREAM_URL is empty (CARD-013). It binds to
+	// loopback on an ephemeral port so it never collides with the main server and
+	// is never exposed off-host; the HTTPProvider is pointed at the resolved
+	// address. Override via GATEWAY_MOCK_UPSTREAM_ADDR.
+	defaultMockUpstreamAddr = "127.0.0.1:0"
 
 	defaultRedisDialTimeout = 5 * time.Second
 	defaultRedisReadTimeout = 3 * time.Second
@@ -116,11 +124,23 @@ type Server struct {
 	ShutdownTimeout time.Duration
 }
 
-// Upstream holds timeouts for the outbound provider boundary (the proxy itself
-// is CARD-002+; only the timeout-bearing config lives here).
+// Upstream holds the outbound provider boundary configuration: the total
+// request timeout for the shared http.Client and the mock-upstream wiring
+// (CARD-013).
 type Upstream struct {
 	// Timeout is the total request timeout for the upstream http.Client.
 	Timeout time.Duration
+
+	// URL, when set, points the HTTPProvider at an EXTERNAL mock-upstream HTTP
+	// endpoint (GATEWAY_UPSTREAM_URL). When empty, cmd/gateway starts an
+	// in-process mock upstream (see MockUpstreamAddr) and points the provider at
+	// it. Optional; no default.
+	URL string
+
+	// MockUpstreamAddr is the listen address for the in-process mock upstream
+	// started when URL is empty (GATEWAY_MOCK_UPSTREAM_ADDR). Defaults to
+	// 127.0.0.1:0 (loopback, ephemeral port).
+	MockUpstreamAddr string
 }
 
 // Redis holds the Redis connection configuration and timeouts (NFR-004).
@@ -330,7 +350,9 @@ func Load() (*Config, error) {
 			ShutdownTimeout: mustDuration("GATEWAY_SHUTDOWN_TIMEOUT", defaultShutdownTimeout),
 		},
 		Upstream: Upstream{
-			Timeout: mustDuration("GATEWAY_UPSTREAM_TIMEOUT", defaultUpstreamTimeout),
+			Timeout:          mustDuration("GATEWAY_UPSTREAM_TIMEOUT", defaultUpstreamTimeout),
+			URL:              getString("GATEWAY_UPSTREAM_URL", ""),
+			MockUpstreamAddr: getString("GATEWAY_MOCK_UPSTREAM_ADDR", defaultMockUpstreamAddr),
 		},
 		Redis: Redis{
 			URL:         getString("GATEWAY_REDIS_URL", "redis://localhost:6379"),
@@ -460,6 +482,24 @@ func (c *Config) Validate() error {
 
 	if c.Metering.BufferSize <= 0 {
 		return fmt.Errorf("metering.BufferSize must be > 0, got %d", c.Metering.BufferSize)
+	}
+
+	// Upstream wiring (CARD-013): either an external URL is set (must be a valid
+	// absolute http(s) URL — fail loud), or the in-process mock upstream is used
+	// and its listen address must be non-empty.
+	if c.Upstream.URL != "" {
+		u, err := url.Parse(c.Upstream.URL)
+		if err != nil {
+			return fmt.Errorf("upstream.URL %q is not a valid URL: %w", c.Upstream.URL, err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("upstream.URL %q must be an http(s) URL, got scheme %q", c.Upstream.URL, u.Scheme)
+		}
+		if u.Host == "" {
+			return fmt.Errorf("upstream.URL %q must include a host", c.Upstream.URL)
+		}
+	} else if c.Upstream.MockUpstreamAddr == "" {
+		return fmt.Errorf("upstream.MockUpstreamAddr must not be empty when upstream.URL is unset")
 	}
 
 	if c.Server.ShutdownTimeout <= 0 {

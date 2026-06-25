@@ -75,6 +75,31 @@ func TestConfig_ValidateRejectsZeroTimeout(t *testing.T) {
 			mutate:  func(c *Config) { c.Logging.Format = "xml" },
 			wantErr: true,
 		},
+		{
+			name:    "valid external upstream URL",
+			mutate:  func(c *Config) { c.Upstream.URL = "https://upstream.example.com" },
+			wantErr: false,
+		},
+		{
+			name:    "malformed upstream URL",
+			mutate:  func(c *Config) { c.Upstream.URL = "://nope" },
+			wantErr: true,
+		},
+		{
+			name:    "upstream URL bad scheme",
+			mutate:  func(c *Config) { c.Upstream.URL = "ftp://host" },
+			wantErr: true,
+		},
+		{
+			name:    "upstream URL missing host",
+			mutate:  func(c *Config) { c.Upstream.URL = "http://" },
+			wantErr: true,
+		},
+		{
+			name:    "empty mock upstream addr when URL unset",
+			mutate:  func(c *Config) { c.Upstream.URL = ""; c.Upstream.MockUpstreamAddr = "" },
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
