@@ -1,6 +1,6 @@
 # CARD-013: HTTP provider adapter + pooled client (exercise connection pooling)
 
-**Status:** ready
+**Status:** done
 **Priority:** P1
 **Category:** feature
 **Estimate:** 2d
@@ -8,11 +8,14 @@
 **Skill:** golang-pro
 **TDD:** —
 **Branch:** card/013-http-provider-pooled-client
-**Worktree:** ../sluice-card-013
+**Worktree:** —
 **Source:** doc/requirements-audit.md (gap #4: connection pooling unexercised + real-upstream ctx cancellation)
 **Depends on:** CARD-003, CARD-002
-**Review score:** —
+**Review score:** 9.5 (1 cycle; 0 critical/important; AC-013a–d ✓; pooling proven via httptrace)
 **Started:** 2026-06-25T13:18:50Z
+**Closed:** 2026-06-25T13:49:24Z
+**Actual:** 0.1d
+**Merge commit:** fa69f1b
 **Closed:** —
 **Actual:** —
 **Merge commit:** —
