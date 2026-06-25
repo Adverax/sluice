@@ -10,7 +10,7 @@
 **Branch:** card/003-proxy-router-health-timeouts
 **Worktree:** —
 **Source:** meta/architecture/handoff.md#increment-1
-**Depends on:** CARD-002
+**Depends on:** CARD-002, CARD-012
 **Review score:** —
 **Started:** —
 **Closed:** —
@@ -20,11 +20,17 @@
 
 ## What to implement
 
-Implement the non-streaming proxy pipeline, HTTP router, and health/readiness endpoints under `internal/proxy/**.go`, `internal/server/**.go`, and `internal/health/**.go`.
+**Contract-first (ADR-0011):** CARD-012 produces `api/openapi.yaml` and the generated
+server (`internal/api/`: request/response types + `StrictServerInterface` + `net/http`
+router registration). This card **implements that generated interface** — do NOT hand-roll
+DTOs or routing that the spec already defines; map the generated API types ↔ `provider.Request`/`Response`.
+
+Implement the non-streaming proxy pipeline, the generated-server implementation, and
+health/readiness logic under `internal/proxy/**.go`, `internal/server/**.go`, and `internal/health/**.go`.
 
 **HTTP Handler & Router (COMP-001):**
-- `internal/server/**.go` — construct `http.Server` with explicit ReadTimeout, WriteTimeout, IdleTimeout (all > 0 per NFR-004).
-- `internal/proxy/**.go` — HTTP handler + router: parse request body, extract `model` field, route to the correct registered provider; return 400 if body is absent/invalid JSON (AC-004), 400 if `model` field is absent (AC-006), 404 if model is unregistered (AC-007); ADR-0006 (hybrid composition order), ADR-0009 (route through Provider interface).
+- `internal/server/**.go` — construct `http.Server` with explicit ReadTimeout, WriteTimeout, IdleTimeout (all > 0 per NFR-004); mount the generated `internal/api` router.
+- Implement the generated `StrictServerInterface`: the `POST /v1/chat/completions` operation maps the generated request type → `provider.Request`, routes by `model` to the registered provider, and maps `provider.Response` → the generated response type. Body decoding/validation and 400-on-malformed are handled by the generated strict server (AC-004); return 400 if `model` absent (AC-006), 404 if model unregistered (AC-007); ADR-0006 (hybrid composition order), ADR-0009 (route through Provider interface).
 
 **Proxy Core — non-streaming path (COMP-002):**
 - Call `Provider.Infer(ctx, req)` with the reused `http.Client` (tuned Transport, explicit timeout).

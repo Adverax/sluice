@@ -61,3 +61,9 @@ resolved:
     resolved_by: ADR-0010
     resolution_label: repository_interface_per_context
     date: 2026-06-25
+
+  - id: DEC-011
+    question: "How is the HTTP API defined and kept consistent — hand-written handlers or contract-first?"
+    resolved_by: ADR-0011
+    resolution_label: openapi_contract_first_oapi_codegen
+    date: 2026-06-25
