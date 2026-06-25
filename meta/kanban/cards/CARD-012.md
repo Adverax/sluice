@@ -74,4 +74,42 @@ This is enabler scaffolding; "done" = the contract exists, generates reproducibl
 
 ## Worktree notes
 
-—
+Implemented on branch `card/012-openapi-contract-codegen`.
+
+**Files created**
+- `api/openapi.yaml` — OpenAPI 3.0.3 spec (single source of truth): `POST /v1/chat/completions`
+  (`ChatCompletionRequest`/`ChatCompletionResponse`, error envelope `Error{error,message}` on
+  400/404/429/500/502/503, SSE `text/event-stream` documented for `stream:true` — CARD-004),
+  `GET /healthz` (`HealthStatus`), `GET /readyz` (`ReadinessStatus` per-dependency map, 200/503),
+  `GET /metrics` (text/plain). Schemas aligned with `provider.Request/Response/Usage/Message/Role`.
+- `oapi-codegen.yaml` — generator config: `models` + `std-http-server` + `strict-server`
+  (+ `embedded-spec`), package `api`, `output: api.gen.go` (resolved relative to `internal/api/`,
+  where the `go:generate` directive runs, so `go generate ./...` writes into this package).
+- `internal/api/generate.go` — package doc + `//go:generate ... --config=../../oapi-codegen.yaml ../../api/openapi.yaml`.
+- `internal/api/api.gen.go` — generated (committed): types, `StrictServerInterface`,
+  `HandlerFromMux`/`NewStrictHandler` on `*http.ServeMux`.
+- `internal/api/api_test.go` — `TestOpenAPISpec_IsValid` (AC-G1, kin-openapi load+Validate) and
+  `TestGeneratedAPI_HasChatCompletionsContract` (AC-G2, compile-time refs + stub implementing the
+  strict interface + `var _ api.StrictServerInterface`).
+- `tools.go` (`//go:build tools`) — pins `oapi-codegen/v2/cmd/oapi-codegen`.
+- Makefile: `generate` target (hand-written, ABOVE the managed markers; markers intact).
+
+**Toolchain / deps**
+- oapi-codegen **v2.7.1**, generator **std-http-server** (+ models + strict-server).
+- Added: `github.com/oapi-codegen/oapi-codegen/v2 v2.7.1`, `github.com/oapi-codegen/runtime`,
+  `github.com/getkin/kin-openapi v0.140.0` (+ transitive).
+
+**DEVIATION — go directive is `go 1.25`, not `go 1.24`.**
+The card/ADR specified `go 1.24` (a minimum driven by pgx). The working oapi-codegen v2 +
+kin-openapi dependency set now *forces* `go 1.25`: `kin-openapi@v0.140.0` declares `go 1.25`.
+Attempts to pin lower self-consistent sets failed — kin-openapi `v0.135.0` has a yaml symbol
+skew (`yaml.UnmarshalWithOriginTree` undefined) against the selected `go.yaml.in/yaml/v3 v3.0.4`,
+and oapi-codegen `v2.5.0`/`v2.6.0` have a broken transitive test dep
+(`speakeasy-api/openapi-overlay` → moved `speakeasy-api/jsonpath/pkg/overlay`) that breaks
+`go mod tidy`. `go 1.25` still satisfies pgx's `>=1.24`, so this is a forward-compatible bump.
+If strict `go 1.24` is required, revisit when oapi-codegen ships a kin-openapi pairing back on
+a `go 1.24` directive.
+
+**Validation:** `make generate` is diff-clean (regenerates byte-identical); `go mod tidy` is
+stable (no go.mod/go.sum churn); `go build ./...` ✅; `go vet ./...` ✅; `go test ./...` ✅
+(incl. `-race` on internal/api).

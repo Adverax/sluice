@@ -3,6 +3,11 @@
 # Hand-written targets may be added ABOVE or BELOW the managed block below;
 # they survive `/forge:harness` regeneration. Do not edit inside the markers.
 
+.PHONY: generate
+
+generate: ## Regenerate code from the OpenAPI spec (oapi-codegen, ADR-0011)
+	go generate ./...
+
 # generated_by: forge:harness — do not edit inside the managed block; edit meta/.skills.yml or run /forge:harness
 # >>> forge:harness (managed) >>>
 .DEFAULT_GOAL := help

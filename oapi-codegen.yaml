@@ -1,0 +1,17 @@
+# oapi-codegen v2 configuration (ADR-0011, CON-001 stdlib-first).
+#
+# Generates the stdlib net/http server boundary (std-http-server, Go 1.22+
+# ServeMux) plus the model types and the strict-server interface. The generated
+# code lives in its own package (internal/api) and is committed; regenerate with
+# `make generate` (or `go generate ./...`).
+package: api
+# output is resolved relative to the directory `go generate` runs the directive
+# in (internal/api/, where generate.go lives), so the file lands in this package.
+output: api.gen.go
+generate:
+  models: true
+  std-http-server: true
+  strict-server: true
+  embedded-spec: true
+output-options:
+  skip-prune: false
