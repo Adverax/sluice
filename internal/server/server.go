@@ -64,6 +64,15 @@ type Server struct {
 	// WithInferFunc without touching the mapping/routing code (ADR-0006).
 	infer InferFunc
 
+	// stream wraps stream INITIATION. By default it is
+	// provider.Provider.InferStream directly; CARD-014 replaces it via
+	// WithStreamFunc with the streaming resilience seam (pool → breaker →
+	// provider.InferStream, NO retry) plus provider metric/span parity, so the
+	// streaming path gets the same resilience/observability as unary (ADR-0006).
+	// Initiation runs BEFORE any SSE byte is written, so an open breaker / pool
+	// saturation fast-fails as a 503 instead of a half-open 200 stream.
+	stream StreamFunc
+
 	// metricsRegistry is the injected Prometheus registry exposed at GET /metrics
 	// (COMP-013, ADR-0008). When nil, GetMetrics serves an empty body so the
 	// generated contract is still satisfied without metrics wiring.
@@ -83,6 +92,22 @@ type Server struct {
 // p.Infer(ctx, req).
 type InferFunc func(ctx context.Context, p provider.Provider, req provider.Request) (provider.Response, error)
 
+// StreamFunc INITIATES a streaming inference against the chosen provider and
+// returns the channel of canonical Chunks. It is the streaming analogue of
+// InferFunc and the wrap point for the streaming resilience seam (CARD-014):
+// pool → breaker → provider.InferStream, with NO retry (a partially-sent stream
+// cannot be safely retried). The returned error reports a FAILURE TO INITIATE
+// the stream — an open breaker (server.ErrServiceUnavailable → 503), pool
+// saturation (server.ErrServiceUnavailable → 503), or a provider error (→ 502).
+// The handler resolves this BEFORE writing the SSE 200 header, so a fast-fail is
+// a real 503 JSON response, never a half-open 200 stream.
+//
+// The decorator owns the channel lifecycle it returns: when wrapped by the pool
+// guard, the acquired slot is released exactly once when the returned channel
+// closes (normal end, ctx cancel, or error). The default simply calls
+// p.InferStream(ctx, req).
+type StreamFunc func(ctx context.Context, p provider.Provider, req provider.Request) (<-chan provider.Chunk, error)
+
 // Option configures a Server via the functional-options pattern (CON-001).
 type Option func(*Server)
 
@@ -92,6 +117,18 @@ func WithInferFunc(fn InferFunc) Option {
 	return func(s *Server) {
 		if fn != nil {
 			s.infer = fn
+		}
+	}
+}
+
+// WithStreamFunc overrides the stream-initiation hook so cmd/gateway can wrap it
+// with the streaming resilience seam (pool → breaker → provider.InferStream, NO
+// retry) and provider metric/span instrumentation (CARD-014), without changing
+// the handler. When nil, the default calls provider.InferStream directly.
+func WithStreamFunc(fn StreamFunc) Option {
+	return func(s *Server) {
+		if fn != nil {
+			s.stream = fn
 		}
 	}
 }
@@ -131,6 +168,9 @@ func New(router *proxy.Router, healthHandler *health.Handler, logger *slog.Logge
 		meter:  metering.NopSink{},
 		infer: func(ctx context.Context, p provider.Provider, req provider.Request) (provider.Response, error) {
 			return p.Infer(ctx, req)
+		},
+		stream: func(ctx context.Context, p provider.Provider, req provider.Request) (<-chan provider.Chunk, error) {
+			return p.InferStream(ctx, req)
 		},
 	}
 	for _, opt := range opts {
@@ -245,22 +285,24 @@ func (s *Server) CreateChatCompletion(ctx context.Context, request api.CreateCha
 	// response visitor (CreateChatCompletionResponseObject), so we return a
 	// custom streamResponse whose VisitCreateChatCompletionResponse drives the
 	// SSE forwarding loop. The provider is resolved here (same as unary); the
-	// per-request context is threaded into InferStream inside Visit so client
+	// per-request context is threaded into the StreamFunc inside Visit so client
 	// disconnect/deadline aborts the upstream (AC-008, AC-009, INV-002).
 	//
-	// Resilience-for-streaming (open-breaker fast-fail on initiation, pool slot)
-	// is a documented follow-up: retry cannot apply to a partially-sent
-	// response, and the breaker/pool wrap the unary infer hook only. The unary
-	// path retains full resilience.
+	// Streaming resilience (CARD-014): the injected stream hook is the seam
+	// pool → breaker → provider.InferStream (NO retry — a partially-sent stream
+	// cannot be safely replayed). Stream INITIATION runs inside Visit BEFORE any
+	// SSE byte is written, so an open breaker / pool saturation fast-fails as a
+	// real 503 (AC-014a/AC-014b) instead of a half-open 200 stream.
 	if req.Stream {
 		return streamResponse{
-			ctx:      ctx,
-			provider: prov,
-			req:      req,
-			logger:   s.logger,
-			model:    body.Model,
-			meter:    s.meter,
-			start:    time.Now(),
+			ctx:    ctx,
+			stream: s.stream,
+			prov:   prov,
+			req:    req,
+			logger: s.logger,
+			model:  body.Model,
+			meter:  s.meter,
+			start:  time.Now(),
 		}, nil
 	}
 
@@ -428,16 +470,22 @@ func (r serviceUnavailableResponse) VisitCreateChatCompletionResponse(w http.Res
 // to forward Server-Sent Events, instead of returning a buffered JSON body.
 //
 // ctx is the per-request context (r.Context()) captured in the handler. It is
-// threaded straight into Provider.InferStream so any cancellation — client
-// disconnect or deadline — propagates to the upstream call and aborts it
-// promptly (FR-003, AC-008, AC-009, INV-002). The Mock honours ctx at every
-// emit step and closes its channel, so the consumer never leaks a goroutine.
+// threaded straight into the StreamFunc (and thus Provider.InferStream) so any
+// cancellation — client disconnect or deadline — propagates to the upstream call
+// and aborts it promptly (FR-003, AC-008, AC-009, INV-002). The Mock honours ctx
+// at every emit step and closes its channel, so the consumer never leaks a
+// goroutine.
 type streamResponse struct {
-	ctx      context.Context
-	provider provider.Provider
-	req      provider.Request
-	logger   *slog.Logger
-	model    string
+	ctx context.Context
+	// stream is the injected streaming resilience seam (pool → breaker →
+	// provider.InferStream, NO retry — CARD-014). It is invoked BEFORE any SSE
+	// byte is written so an initiation failure (open breaker / saturation /
+	// provider error) fast-fails with the proper HTTP status (AC-014a/b).
+	stream StreamFunc
+	prov   provider.Provider
+	req    provider.Request
+	logger *slog.Logger
+	model  string
 	// meter records a best-effort UsageEvent after the stream completes, using
 	// the terminal chunk's usage (FR-014). Enqueue is non-blocking (INV-003).
 	meter metering.Sink
@@ -449,10 +497,18 @@ type streamResponse struct {
 // protocol; clients stop reading when they see it.
 const sseDone = "data: [DONE]\n\n"
 
-// VisitCreateChatCompletionResponse drives the SSE forwarding loop. It writes
-// the streaming headers + 200 status, resolves the provider stream via
-// InferStream(ctx, ...), and forwards each canonical Chunk as an SSE `data:`
-// event, flushing after every write so clients see deltas as they arrive.
+// VisitCreateChatCompletionResponse drives the SSE forwarding loop. It FIRST
+// initiates the stream via the injected StreamFunc (pool → breaker →
+// provider.InferStream, NO retry — CARD-014) and inspects the initiation error
+// BEFORE writing any byte. This is the critical fast-fail ordering (AC-014a/b):
+//
+//   - open breaker / pool saturation (errors.Is ErrServiceUnavailable) → 503 +
+//     Retry-After as a normal JSON error response, NOT a half-open 200 stream;
+//   - any other initiation failure (provider error) → 502 JSON error response.
+//
+// Only on SUCCESSFUL initiation does it write the streaming headers + 200 status
+// and forward each canonical Chunk as an SSE `data:` event, flushing after every
+// write so clients see deltas as they arrive.
 //
 // Flush goes through http.NewResponseController(w).Flush(): the metrics/tracing
 // middleware wrap the ResponseWriter and implement Unwrap() http.ResponseWriter,
@@ -461,9 +517,17 @@ const sseDone = "data: [DONE]\n\n"
 //
 // The select on ctx.Done() vs the chunk channel guarantees prompt return on
 // client disconnect: when ctx is cancelled we stop forwarding and return, which
-// (because ctx was passed to InferStream) cancels the upstream and lets the
-// provider goroutine drain and close the channel — no goroutine leak.
+// (because ctx was passed to the StreamFunc) cancels the upstream and lets the
+// provider goroutine drain and close the channel — and the pool-guard slot
+// release fires exactly once on that close (no slot leak, no goroutine leak).
 func (r streamResponse) VisitCreateChatCompletionResponse(w http.ResponseWriter) error {
+	// Initiate the stream FIRST, before committing to a 200 / writing any byte.
+	ch, err := r.stream(r.ctx, r.prov, r.req)
+	if err != nil {
+		return r.writeInitError(w, err)
+	}
+
+	// Initiation succeeded: now commit to the SSE 200 response and forward.
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -471,20 +535,6 @@ func (r streamResponse) VisitCreateChatCompletionResponse(w http.ResponseWriter)
 
 	rc := http.NewResponseController(w)
 	_ = rc.Flush() // flush headers so the client sees the stream open immediately.
-
-	ch, err := r.provider.InferStream(r.ctx, r.req)
-	if err != nil {
-		// Failure to initialise the stream: headers/200 are already sent, so we
-		// cannot change the status. Emit a terminal marker and log (AC-003 cannot
-		// apply once committed to 200). This mirrors the streaming SSE convention.
-		r.logger.LogAttrs(r.ctx, slog.LevelError, "InferStream initialisation failed",
-			slog.String("model", r.model),
-			slog.String("error", err.Error()),
-		)
-		_, _ = w.Write([]byte(sseDone))
-		_ = rc.Flush()
-		return nil
-	}
 
 	for {
 		select {
@@ -547,6 +597,65 @@ func (r streamResponse) VisitCreateChatCompletionResponse(w http.ResponseWriter)
 			_ = rc.Flush()
 		}
 	}
+}
+
+// writeInitError maps a stream-INITIATION failure onto a normal JSON error
+// response written BEFORE any SSE byte (AC-014a/b). Because nothing has been
+// committed to the wire yet, the handler can still set a real status code:
+//
+//   - an open breaker / pool saturation (errors.Is ErrServiceUnavailable) → 503
+//     with a Retry-After header when the error supplies a hint (retryAfterer);
+//   - any other initiation failure (provider error) → 502.
+//
+// It writes Content-Type: application/json (NOT text/event-stream), so the
+// client receives a clean error, never a half-open 200 stream that dies.
+func (r streamResponse) writeInitError(w http.ResponseWriter, err error) error {
+	if errors.Is(err, ErrServiceUnavailable) {
+		r.logger.LogAttrs(r.ctx, slog.LevelWarn, "stream fast-failed (resilience)",
+			slog.String("model", r.model),
+			slog.String("error", err.Error()),
+		)
+		w.Header().Set("Content-Type", "application/json")
+		if ra := retryAfterFrom(err); ra > 0 {
+			secs := int(ra.Round(time.Second) / time.Second)
+			if secs < 1 {
+				secs = 1
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(secs))
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(api.Error{
+			Error:   "service_unavailable",
+			Message: "upstream temporarily unavailable; retry later",
+		})
+		return nil
+	}
+
+	// Any other failure to initialise the stream (e.g. provider/transport error)
+	// → 502, mirroring the unary provider-error mapping (AC-003). No bytes have
+	// been written yet, so this is a clean JSON error, not a half-open stream.
+	r.logger.LogAttrs(r.ctx, slog.LevelError, "stream initialisation failed",
+		slog.String("model", r.model),
+		slog.String("error", err.Error()),
+	)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadGateway)
+	_ = json.NewEncoder(w).Encode(api.Error{
+		Error:   "provider_error",
+		Message: "upstream provider request failed",
+	})
+	return nil
+}
+
+// retryAfterFrom extracts a Retry-After hint from err if it satisfies the
+// retryAfterer interface (the resilience Unavailable and pool saturation errors
+// both do), so the streaming 503 carries the same hint as the unary path.
+func retryAfterFrom(err error) time.Duration {
+	var ra retryAfterer
+	if errors.As(err, &ra) {
+		return ra.RetryAfter()
+	}
+	return 0
 }
 
 // recordUsage enqueues a best-effort UsageEvent for the completed stream. The

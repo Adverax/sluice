@@ -1,0 +1,107 @@
+version: 1
+generated_at: "2026-06-25T14:00:00Z"
+target: "card/014-streaming-resilience (CARD-014: streaming resilience seam)"
+overall_score: 8.5
+risk_level: medium
+review_lane: deep
+reviewer: forge:review
+
+coverage:
+  read:
+    - "internal/server/server.go"
+    - "internal/server/stream_resilience_test.go"
+    - "internal/pool/pool.go"
+    - "internal/breaker/breaker.go"
+    - "internal/proxy/resilience/resilience.go"
+    - "internal/metrics/infer.go"
+    - "internal/tracing/infer.go"
+    - "cmd/gateway/main.go"
+    - "github.com/sony/gobreaker@v1.0.0/gobreaker.go (half-open accounting)"
+  not_reached:
+    - "internal/api/api.gen.go (out of scope by instruction)"
+    - "internal/provider/provider.go (only Chunk type confirmed)"
+  confidence: high
+
+metrics:
+  diff: { files: 9, added: 898, removed: 43 }
+  max_fan_in: { symbol: "server.StreamFunc", callers: 4 }
+  tests_cover_change: true
+  hotspots: ["internal/server/server.go"]
+  cochange_missing: []
+
+root_causes: []
+
+findings:
+  - id: F-001
+    severity: medium
+    category: tech-debt
+    type: gap
+    file: internal/server/stream_resilience_test.go
+    line: 259
+    title: "No end-to-end cancel test over the full 3-forwarder chain"
+    description: |
+      The shipped chain (cmd/gateway:195) is tracing→metrics→pool→breaker→provider —
+      three stacked forwarder goroutines. Each layer is leak-tested in ISOLATION
+      (AC-014d wraps only pool; AC-014c wraps tracing+metrics but no pool and no
+      cancel). No test exercises all three forwarders together under client cancel,
+      which is exactly the highest-risk path this card introduces.
+    suggestion: |
+      Add a test that builds instrumentedStream exactly as main.go does
+      (tracer.InstrumentStreamFunc(met.InstrumentStreamFunc(pool.GuardStream(...))))
+      over a slow provider, cancels mid-stream, and asserts pool.InFlight()==0,
+      the provider.stream span ended, and the metric observed — under -race.
+    confidence: high
+    source: static
+    root_cause: null
+    status: open
+    fixed_in: null
+    dismissed_reason: null
+
+  - id: F-002
+    severity: low
+    category: tech-debt
+    type: risk
+    file: internal/metrics/infer.go
+    line: 62
+    title: "nil source channel from a misbehaving init leaks forwarder + slot"
+    description: |
+      All three forwarders (metrics:62, tracing:70, pool:212) select on `<-src`.
+      If an inner layer returns (nil channel, nil error) — a StreamFunc/StreamCall
+      contract violation — the forwarder blocks on the nil channel until ctx.Done,
+      then `for range src` (nil) blocks forever: goroutine leak, pool slot never
+      released, span never ended. Requires a provider returning (nil,nil) on init,
+      so likelihood is low, but the chain has no defensive guard.
+    suggestion: |
+      In each StreamFunc wrapper, after a nil-error init, treat a nil src as an
+      immediately-closed/empty stream (release slot / end span / observe now), or
+      assert the contract at the breaker seam.
+    confidence: medium
+    source: static
+    root_cause: null
+    status: open
+    fixed_in: null
+    dismissed_reason: null
+
+  - id: F-003
+    severity: low
+    category: ops
+    type: question
+    file: internal/metrics/infer.go
+    line: 50
+    title: "Fast-fail (open breaker / saturation) still records provider metric + span"
+    description: |
+      Instrumentation wraps the pool (tracing(metrics(pool(breaker(provider))))),
+      so a 503 fast-fail with NO provider call still observes
+      provider_request_duration_seconds{provider} (~0s) and emits a provider.stream
+      span. This is consistent with the unary path (same layering) and arguably
+      acceptable, but it slightly inflates provider-latency series / span volume
+      with attempts that never reached the provider.
+    suggestion: |
+      If undesired, skip the observation/span when err is ErrServiceUnavailable
+      (open breaker / saturation). Otherwise document it as intended parity.
+    confidence: high
+    source: static
+    root_cause: null
+    status: open
+    fixed_in: null
+    dismissed_reason: null

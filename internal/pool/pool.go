@@ -32,6 +32,7 @@ package pool
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/adverax/sluice/internal/provider"
@@ -158,4 +159,100 @@ func (p *Pool) Guard(next server.InferFunc) server.InferFunc {
 // (Limit/InFlight) or to share one pool across several seams.
 func Guard(size int, retryAfter time.Duration, next server.InferFunc) server.InferFunc {
 	return New(size, retryAfter).Guard(next)
+}
+
+// GuardStream wraps next (a streaming initiation seam) with the SAME bounded
+// pool so streams count against the concurrency limit (CARD-014, NFR-006). The
+// returned server.StreamFunc:
+//
+//   - On a free slot: holds it, INITIATES the stream via next (breaker →
+//     provider.InferStream). On an initiation ERROR the slot is released
+//     immediately (no leak) and the error is propagated so the server fast-fails
+//     (503 for an open breaker, 502 otherwise) BEFORE any SSE byte. On SUCCESS
+//     the slot is held for the WHOLE stream lifetime and released EXACTLY ONCE
+//     when the stream ends — channel closed, ctx cancelled, or error — via a
+//     forwarding goroutine that drains the source channel to completion.
+//   - On a full pool: returns &saturatedError IMMEDIATELY — no goroutine
+//     started, no blocking — which the server maps to 503 + Retry-After
+//     (AC-014b), exactly like the unary Guard.
+//
+// Slot/goroutine safety (INV-001, NFR-006): the slot is released exactly once
+// (a sync.Once guards a double-release if the source closes AND ctx cancels) and
+// the forwarding goroutine always terminates — it returns when the source
+// channel closes, or when ctx is done (it then keeps draining the source in a
+// detached tail so the provider goroutine can finish and close, never blocking
+// on an unread send). No slot leak, no goroutine leak under cancellation.
+func (p *Pool) GuardStream(next server.StreamFunc) server.StreamFunc {
+	return func(ctx context.Context, prov provider.Provider, req provider.Request) (<-chan provider.Chunk, error) {
+		if !p.tryAcquire() {
+			// Reject-before-work: shed load without spawning a goroutine.
+			return nil, &saturatedError{retryAfter: p.retryAfter}
+		}
+
+		src, err := next(ctx, prov, req)
+		if err != nil {
+			// Initiation failed: release the slot now (the stream never started)
+			// and propagate so the server fast-fails before committing to 200.
+			p.release()
+			return nil, err
+		}
+
+		// Contract guard: a nil channel with a nil error is a violated contract by
+		// an inner layer. Treat it as an immediately-closed zero-length stream so
+		// the slot is released now and the caller gets a closed channel rather than
+		// a forwarding goroutine that blocks forever on a nil channel read.
+		if src == nil {
+			p.release()
+			out := make(chan provider.Chunk)
+			close(out)
+			return out, nil
+		}
+
+		// Initiation succeeded: hold the slot for the stream lifetime. A forwarding
+		// goroutine copies src → out and releases the slot exactly once when src is
+		// fully drained (closed). releaseOnce guards against any future double-call.
+		var releaseOnce sync.Once
+		releaseSlot := func() { releaseOnce.Do(p.release) }
+
+		out := make(chan provider.Chunk)
+		go func() {
+			defer close(out)
+			defer releaseSlot()
+			for {
+				select {
+				case chunk, ok := <-src:
+					if !ok {
+						// Source drained/closed: stream ended; slot released by defer.
+						return
+					}
+					select {
+					case out <- chunk:
+					case <-ctx.Done():
+						// Consumer gone (client disconnect): stop forwarding, but keep
+						// draining src so the provider goroutine can finish and close it
+						// — otherwise its blocked send would leak. Slot released by defer
+						// once src closes.
+						drain(src)
+						return
+					}
+				case <-ctx.Done():
+					// Cancelled while waiting for the next chunk: drain src to its close
+					// so the provider goroutine never leaks, then return (slot released
+					// by defer).
+					drain(src)
+					return
+				}
+			}
+		}()
+		return out, nil
+	}
+}
+
+// drain reads ch until it is closed, discarding values. It lets a provider
+// goroutine that is blocked sending on ch make progress and terminate after the
+// consumer has gone away, so neither the provider goroutine nor the pool slot
+// leaks on cancellation.
+func drain(ch <-chan provider.Chunk) {
+	for range ch {
+	}
 }
