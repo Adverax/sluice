@@ -1,0 +1,91 @@
+version: 1
+generated_at: "2026-06-25T00:00:00Z"
+target: "card/011-load-test-ci-makeup (CARD-011)"
+overall_score: 8.5
+risk_level: low
+review_lane: fast
+reviewer: forge:review
+
+coverage:
+  read:
+    - "load/RESULTS.md"
+    - "load/bench_test.go"
+    - "load/scenario.js"
+    - "internal/integration/"
+    - ".github/workflows/ci.yml"
+    - ".golangci.yml"
+    - "Dockerfile"
+    - "deploy/docker-compose.stack.yml"
+    - "deploy/prometheus.yml"
+    - "deploy/grafana/"
+    - "Makefile"
+    - "README.md"
+    - "internal/server/server.go"
+    - "internal/metrics/middleware_test.go"
+  not_reached:
+    - "internal/api/api.gen.go (generated, only GetSpec confirmed)"
+  confidence: high
+metrics:
+  diff: { files: 22, added: 1705, removed: 22 }
+  tests_cover_change: true
+  hotspots: []
+  cochange_missing: []
+
+root_causes:
+  - id: RC-1
+    title: "Full-stack `up` overrides the managed `up` below the markers, mutating the managed `run` contract"
+    finding_ids: [F-001]
+
+findings:
+  - id: F-001
+    severity: high
+    category: enabler
+    type: bug
+    file: Makefile
+    line: 82
+    title: "`make run` is broken: managed `run: up` now triggers full-stack docker up + a second local go run, both on :8080"
+    description: |
+      The managed target `run: up` (line 32) runs `go run ./cmd/gateway` after its
+      `up` prerequisite. The hand-written block redefines `up` (line 82) to bring up
+      the FULL docker stack including a gateway container published on 8080:8080
+      (deploy/docker-compose.stack.yml:49-50). Make uses the last definition, so
+      `make run` now starts the dockerised gateway on :8080 AND then a local
+      `go run` gateway that also binds :8080 — a port conflict / confusing double
+      start. The normal single-process dev loop `make run` was designed for is
+      broken.
+    suggestion: |
+      Don't override the managed `up`/`down` below the markers. Name the full-stack
+      target `make stack` (and `stack-down`), leaving managed `up`/`run` intact for
+      the infra-only + local-process dev loop. Update README/RESULTS quickstart to
+      `make stack`.
+    confidence: high
+    source: static
+    root_cause: RC-1
+    status: open
+    fixed_in: null
+    dismissed_reason: null
+
+  - id: F-002
+    severity: low
+    category: enabler
+    type: gap
+    file: internal/integration/integration_test.go
+    line: 56
+    title: "isUnavailable only matches DeadlineExceeded; image-pull failures fail hard rather than skip"
+    description: |
+      requireDocker() correctly detects Docker absence (NewDockerProvider + Health)
+      and skips — this is a real detection, not an always-skip, so the suite is not
+      vacuous. However startPostgres/startRedis additionally guard container start
+      with isUnavailable(err), which only matches context.DeadlineExceeded. A
+      registry/network image-pull failure surfaces as a different error and hits
+      t.Fatalf rather than t.Skipf. Minor: the primary Docker gate already covers
+      the no-Docker CI case.
+    suggestion: |
+      Broaden isUnavailable to also treat image-pull / daemon-connection errors as
+      skippable, or drop the redundant second guard and rely on requireDocker.
+    confidence: medium
+    source: static
+    root_cause: null
+    status: open
+    fixed_in: null
+    dismissed_reason: null

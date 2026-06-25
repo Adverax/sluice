@@ -95,4 +95,49 @@ Deliver the production-readiness harness: load testing, race-free test suite, CI
 
 ## Worktree notes
 
-—
+**CARD-011 implemented (branch card/011-load-test-ci-makeup).**
+
+**Integration suite (`internal/integration/`, build tag `integration`):**
+testcontainers-go spins up REAL Postgres + Redis and exercises the deferred
+paths: metering pgx batch-INSERT + read-back (migration applied), cache Redis
+Set/Get/TTL round-trip, distributed rate-limit Lua across two repo instances
+sharing one Redis (AC-013), and readiness 200→503 when a container is stopped.
+Ran here against live Docker — **all 4 PASS, race-clean**:
+`go test -tags=integration -race -p 1 ./...` → `ok internal/integration 7.3s`.
+Degrades to skip-with-log when no Docker daemon is reachable.
+
+**Load (`load/`):** `load/bench_test.go` is the in-process AC harness over the
+full server handler chain with a 0-latency mock — `TestBenchGateway_p95Overhead-
+Under20ms` (AC-042), `_Overload3x_…` (AC-043), `_GoroutineLeakCheck` (AC-044),
+`_GoroutineCountBounded` (AC-047), `TestSuite_RaceFree` (AC-049). All PASS.
+**Real p95 overhead ≈ 11 µs (normal) / 67 µs (-race), Apple M5 Pro / Go 1.26 —
+~1000× under the 20 ms NFR-001 budget.** `load/scenario.js` is the k6 ramp →
+plateau (~3k RPS) → 3× spike → recovery scenario with NFR thresholds baked in.
+`load/RESULTS.md` carries the REAL in-process numbers (labelled with the env) and
+leaves the full-stack k6 table as an explicit `TODO: measure via make load`
+(k6 not installed in this environment — no fabricated figures).
+
+**CI (`.github/workflows/ci.yml`, CON-004):** jobs build (+ go-generate diff
+check), unit+race, golangci-lint, and a testcontainers integration job.
+`.golangci.yml` enables staticcheck/errcheck/govet/ineffassign/unused/gofmt.
+Fixed the pre-existing SA1019 (`api.GetSwagger` → non-deprecated `api.GetSpec`
+in `internal/server/server.go`) and removed an unused test helper that `unused`
+flagged. `golangci-lint run` is clean (exit 0).
+
+**Make-up stack (CON-005):** multi-stage `Dockerfile` (distroless final image);
+`deploy/docker-compose.stack.yml` adds gateway + one-shot `migrate` + prometheus
++ grafana, layered on top of the managed `deploy/docker-compose.yml` so the
+forge:harness managed region is untouched (`docker compose config` validates).
+`deploy/prometheus.yml` scrapes the gateway; `deploy/grafana/provisioning/` +
+`deploy/grafana/dashboards/sluice.json` auto-provision a dashboard with a panel
+per metric. Makefile gains `up` (full stack, overrides managed up BELOW the
+markers), `down`, `migrate`, `stack-logs`, `test-integration`, `load`.
+
+**README.md:** headline performance line, C4 links, `make up` quickstart with
+non-stream + streaming curl examples, and a patterns→package/file checklist.
+
+**Gates:** `go build ./...` OK; `go test -race ./...` green; integration suite
+PASS; `golangci-lint run` clean; `go generate ./...` diff-clean (api.gen.go /
+openapi.yaml untouched); `go mod tidy` applied (added testcontainers-go +
+modules/postgres + modules/redis). k6 not installed locally → `make load`
+artifact provided with run instructions instead of a local k6 run.

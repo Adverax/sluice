@@ -606,7 +606,9 @@ func (s *Server) Handler(mux *http.ServeMux) http.Handler {
 	// Build the kin-openapi request-validation middleware from the embedded spec.
 	// swagger.Servers is cleared to avoid host/scheme matching rejections in tests
 	// and in environments where the Host header doesn't match a declared server.
-	swagger, err := api.GetSwagger()
+	// GetSpec is the non-deprecated accessor (GetSwagger predates kin-openapi's
+	// openapi3.Swagger→openapi3.T rename and is deprecated, SA1019).
+	swagger, err := api.GetSpec()
 	if err != nil {
 		// This is a programming error (bad embedded spec); panic early so it is
 		// caught by tests rather than silently skipping validation at runtime.

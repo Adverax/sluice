@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	dto "github.com/prometheus/client_model/go"
-
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/adverax/sluice/internal/metrics"
@@ -54,20 +52,6 @@ func gatherRouteLabels(t *testing.T, met *metrics.Metrics) map[string]bool {
 		}
 	}
 	return routes
-}
-
-// counterValue reads the value of a *prometheus.CounterVec for a set of labels.
-func counterValue(t *testing.T, cv *prometheus.CounterVec, labels ...string) float64 {
-	t.Helper()
-	obs, err := cv.GetMetricWithLabelValues(labels...)
-	if err != nil {
-		t.Fatalf("GetMetricWithLabelValues(%v): %v", labels, err)
-	}
-	var m dto.Metric
-	if err := obs.(prometheus.Metric).Write(&m); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	return m.GetCounter().GetValue()
 }
 
 // TestMetrics_RouteCardinality_UnmatchedPath checks that a request to an unknown

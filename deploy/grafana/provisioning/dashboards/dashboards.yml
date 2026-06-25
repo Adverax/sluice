@@ -1,0 +1,14 @@
+# Grafana dashboard provider: load every dashboard JSON in /var/lib/grafana/dashboards.
+apiVersion: 1
+
+providers:
+  - name: sluice
+    orgId: 1
+    folder: sluice
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

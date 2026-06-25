@@ -1,0 +1,85 @@
+# Full `make up` stack overlay (CON-005, CARD-011).
+#
+# This file is layered ON TOP of deploy/docker-compose.yml (which owns the
+# forge:harness managed postgres+redis services) so the managed region is never
+# touched. `make up` composes BOTH files:
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.stack.yml up -d
+#
+# It adds the gateway (built from the repo-root Dockerfile), a one-shot migrate
+# step that applies migrations/0001_usage_events.sql, plus Prometheus + Grafana
+# wired to scrape and visualise the gateway's /metrics (the six+ required metrics).
+services:
+  # One-shot: apply SQL migrations to Postgres before the gateway starts.
+  migrate:
+    image: postgres:16-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: app
+    volumes:
+      - ../migrations:/migrations:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        for f in /migrations/*.sql; do
+          echo "applying $$f";
+          psql -h postgres -U app -d sluice -v ON_ERROR_STOP=1 -f "$$f" || exit 1;
+        done
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      GATEWAY_ADDR: ":8080"
+      # Reach the backing services by compose service name.
+      GATEWAY_DB_DSN: "postgres://app:app@postgres:5432/sluice?sslmode=disable"
+      GATEWAY_REDIS_URL: "redis://redis:6379"
+      GATEWAY_WORKER_POOL_SIZE: "100"
+      GATEWAY_LOG_FORMAT: "json"
+    ports:
+      - "8080:8080"
+    # No container healthcheck: the distroless image ships only the gateway
+    # binary (no shell/curl/wget), and the binary itself takes no probe subcommand.
+    # Liveness/readiness are exposed at GET /healthz and GET /readyz and scraped
+    # via Prometheus; `make up` waits on postgres/redis health, not the gateway.
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    depends_on:
+      - gateway
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  grafana-data:
