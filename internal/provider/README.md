@@ -9,7 +9,7 @@ these shapes by adapter code, so no provider-specific type ever crosses this bou
 
 ```go
 type Provider interface {
-    Infer(ctx context.Context, req Request) (Response, error)        // unary
+    Infer(ctx context.Context, req Request) (Response, error)          // unary
     InferStream(ctx context.Context, req Request) (<-chan Chunk, error) // streaming (SSE)
 }
 ```
@@ -23,7 +23,8 @@ error, or cancellation.
 - `Request` — `Model`, `Messages []Message`, `Stream`, `MaxTokens`, `*Temperature` (provider-agnostic).
 - `Response` — `Model`, `Content`, `FinishReason`, normalized `Usage` (so metering/CARD-010 reads canonical usage only).
 - `Chunk` — one streamed delta: `Content`, `Done` (terminal), `Usage` (on terminal chunk), `Err` (mid-stream failure).
-- `Message` / `Role` (system|user|assistant) / `Usage{Prompt,Completion,Total Tokens}`.
+- `Message` / `Role` (system|user|assistant) / `Usage{Prompt,Completion,TotalTokens}`.
+- `StatusError{Code, Message}` — canonical upstream HTTP error. `Retryable()` returns `true` for 5xx, `false` for 4xx (AC-021). Used by the retry engine to classify failures without string-matching.
 
 ## Mock
 
@@ -38,3 +39,8 @@ selects on `ctx.Done()` at every send and closes the channel via `defer` (no gor
 
 Real adapters (OpenAI, Anthropic) are deferred; they will implement `Provider` and
 translate wire-format ↔ canonical types here.
+
+## See also
+
+- `internal/proxy/retry` — uses `StatusError.Retryable()` for retry classification
+- ADR-0009: `meta/architecture/decisions/adr/0009-single-provider-interface.md`

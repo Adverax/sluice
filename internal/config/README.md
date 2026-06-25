@@ -15,6 +15,8 @@ If a variable is set but malformed or `<= 0`, `Load` returns an error immediatel
 | `Redis` | Connection URL and dial/read timeouts (client wired in CARD-003). |
 | `Postgres` | DSN and pool-acquire timeout (pool wired in CARD-003). |
 | `Logging` | Level and format for the structured logger. |
+| `Retry` | Retry engine tuning: `MaxAttempts`, `BaseDelay`, `MaxDelay`, `Jitter`. |
+| `Breaker` | Circuit breaker tuning (ADR-0002): `Interval`, `Timeout`, `MaxRequests`, `MinRequests`, `FailureRatio`, `RetryAfter`. |
 
 ## Key function
 
@@ -39,5 +41,15 @@ If a variable is set but malformed or `<= 0`, `Load` returns an error immediatel
 | `GATEWAY_LOG_FORMAT` | `json` | `json` (production) or `text` (local dev) |
 | `GATEWAY_HEALTH_CHECK_TIMEOUT` | `3s` | Per-check deadline for `/readyz` dependency checks |
 | `GATEWAY_WORKER_POOL_SIZE` | `100` | Worker pool size (CARD-008) |
+| `GATEWAY_RETRY_MAX_ATTEMPTS` | `3` | Total attempts (first call + retries); `1` disables retries |
+| `GATEWAY_RETRY_BASE_DELAY` | `50ms` | Backoff for the first retry |
+| `GATEWAY_RETRY_MAX_DELAY` | `2s` | Cap on exponential backoff |
+| `GATEWAY_RETRY_JITTER` | `0.5` | Jitter fraction in `[0,1]` |
+| `GATEWAY_BREAKER_INTERVAL` | `10s` | Tumbling counter-reset period (ADR-0002) |
+| `GATEWAY_BREAKER_TIMEOUT` | `60s` | Open → half-open recovery |
+| `GATEWAY_BREAKER_MAX_REQUESTS` | `5` | Half-open probe budget |
+| `GATEWAY_BREAKER_MIN_REQUESTS` | `10` | Minimum volume before tripping |
+| `GATEWAY_BREAKER_FAILURE_RATIO` | `0.5` | Failure ratio threshold (0–1] |
+| `GATEWAY_BREAKER_RETRY_AFTER` | `60s` | `Retry-After` hint surfaced on 503 fast-fail |
 
 Duration values use Go's `time.ParseDuration` syntax (e.g. `5s`, `1m30s`).

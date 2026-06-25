@@ -179,6 +179,31 @@ func Load() (*Config, error) {
 		return d
 	}
 
+	mustFloat := func(key string, fallback float64) float64 {
+		f, err := getFloat(key, fallback)
+		if err != nil {
+			errs = append(errs, err)
+			return fallback
+		}
+		return f
+	}
+
+	// mustPositiveInt reads an int and additionally rejects non-positive values
+	// (catches wrapping on uint32 cast and invalid counts). Used for fields where
+	// <= 0 is always invalid (attempts, requests).
+	mustPositiveInt := func(key string, fallback int) int {
+		n, err := getInt(key, fallback)
+		if err != nil {
+			errs = append(errs, err)
+			return fallback
+		}
+		if n <= 0 {
+			errs = append(errs, fmt.Errorf("env %s=%d: value must be > 0", key, n))
+			return fallback
+		}
+		return n
+	}
+
 	cfg := &Config{
 		Server: Server{
 			Addr:            getString("GATEWAY_ADDR", defaultAddr),
@@ -204,21 +229,21 @@ func Load() (*Config, error) {
 			Format: getString("GATEWAY_LOG_FORMAT", defaultLogFormat),
 		},
 		Retry: Retry{
-			MaxAttempts: getInt("GATEWAY_RETRY_MAX_ATTEMPTS", defaultRetryMaxAttempts),
+			MaxAttempts: mustPositiveInt("GATEWAY_RETRY_MAX_ATTEMPTS", defaultRetryMaxAttempts),
 			BaseDelay:   mustDuration("GATEWAY_RETRY_BASE_DELAY", defaultRetryBaseDelay),
 			MaxDelay:    mustDuration("GATEWAY_RETRY_MAX_DELAY", defaultRetryMaxDelay),
-			Jitter:      getFloat("GATEWAY_RETRY_JITTER", defaultRetryJitter),
+			Jitter:      mustFloat("GATEWAY_RETRY_JITTER", defaultRetryJitter),
 		},
 		Breaker: Breaker{
 			Interval:     mustDuration("GATEWAY_BREAKER_INTERVAL", defaultBreakerInterval),
 			Timeout:      mustDuration("GATEWAY_BREAKER_TIMEOUT", defaultBreakerTimeout),
-			MaxRequests:  uint32(getInt("GATEWAY_BREAKER_MAX_REQUESTS", defaultBreakerMaxRequests)),
-			MinRequests:  uint32(getInt("GATEWAY_BREAKER_MIN_REQUESTS", defaultBreakerMinRequests)),
-			FailureRatio: getFloat("GATEWAY_BREAKER_FAILURE_RATIO", defaultBreakerFailureRatio),
+			MaxRequests:  uint32(mustPositiveInt("GATEWAY_BREAKER_MAX_REQUESTS", defaultBreakerMaxRequests)),
+			MinRequests:  uint32(mustPositiveInt("GATEWAY_BREAKER_MIN_REQUESTS", defaultBreakerMinRequests)),
+			FailureRatio: mustFloat("GATEWAY_BREAKER_FAILURE_RATIO", defaultBreakerFailureRatio),
 			RetryAfter:   mustDuration("GATEWAY_BREAKER_RETRY_AFTER", defaultBreakerRetryAfter),
 		},
 		HealthCheckTimeout: mustDuration("GATEWAY_HEALTH_CHECK_TIMEOUT", defaultHealthCheckTimeout),
-		WorkerPoolSize:     getInt("GATEWAY_WORKER_POOL_SIZE", defaultWorkerPoolSize),
+		WorkerPoolSize:     mustPositiveInt("GATEWAY_WORKER_POOL_SIZE", defaultWorkerPoolSize),
 	}
 
 	if len(errs) > 0 {
@@ -325,26 +350,32 @@ func getDuration(key string, fallback time.Duration) (time.Duration, error) {
 	return d, nil
 }
 
-func getInt(key string, fallback int) int {
+// getInt returns (default, nil) when the env var is unset/empty.
+// It returns (default, error) when the var is set but unparseable,
+// so Load() can surface that as a hard failure (NFR-004 fail-loud).
+func getInt(key string, fallback int) (int, error) {
 	v, ok := os.LookupEnv(key)
 	if !ok || v == "" {
-		return fallback
+		return fallback, nil
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil {
-		return fallback
+		return fallback, fmt.Errorf("env %s=%q: %w", key, v, err)
 	}
-	return n
+	return n, nil
 }
 
-func getFloat(key string, fallback float64) float64 {
+// getFloat returns (default, nil) when the env var is unset/empty.
+// It returns (default, error) when the var is set but unparseable,
+// so Load() can surface that as a hard failure (NFR-004 fail-loud).
+func getFloat(key string, fallback float64) (float64, error) {
 	v, ok := os.LookupEnv(key)
 	if !ok || v == "" {
-		return fallback
+		return fallback, nil
 	}
 	f, err := strconv.ParseFloat(v, 64)
 	if err != nil {
-		return fallback
+		return fallback, fmt.Errorf("env %s=%q: %w", key, v, err)
 	}
-	return f
+	return f, nil
 }

@@ -171,6 +171,60 @@ func TestCircuitBreaker_HalfOpen_SuccessClosesCircuit(t *testing.T) {
 	}
 }
 
+// TestCircuitBreaker_CtxCancel_DoesNotTripBreaker asserts that a burst of
+// client-cancelled calls does NOT open the breaker (NFR: a client hanging up
+// is not a provider fault). Even after enough cancellations to exceed
+// MinRequests, the breaker must remain closed.
+func TestCircuitBreaker_CtxCancel_DoesNotTripBreaker(t *testing.T) {
+	cfg := adrCfg() // MinRequests=10, FailureRatio=0.5
+	reg := breaker.NewRegistry(cfg)
+
+	// Send 15 calls — more than MinRequests — each with an already-cancelled
+	// context. These should NOT count as failures.
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately so it's already done
+
+	for i := 0; i < 15; i++ {
+		_, err := reg.Execute(cancelledCtx, key, func(ctx context.Context) (provider.Response, error) {
+			// The ctx is cancelled; a real provider would return ctx.Err().
+			return provider.Response{}, ctx.Err()
+		})
+		// The ctx error must propagate to the caller.
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("call %d: expected context.Canceled, got %v", i+1, err)
+		}
+	}
+
+	// The breaker must remain closed — ctx cancellations are not provider failures.
+	if state := reg.State(key); state != gobreaker.StateClosed {
+		t.Errorf("breaker must stay closed after client cancellations, got %v", state)
+	}
+}
+
+// TestCircuitBreaker_CtxDeadline_DoesNotTripBreaker mirrors the cancellation
+// test for context.DeadlineExceeded.
+func TestCircuitBreaker_CtxDeadline_DoesNotTripBreaker(t *testing.T) {
+	cfg := adrCfg()
+	reg := breaker.NewRegistry(cfg)
+
+	for i := 0; i < 15; i++ {
+		// Create a context that has already expired.
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+
+		_, err := reg.Execute(ctx, key, func(ctx context.Context) (provider.Response, error) {
+			return provider.Response{}, ctx.Err()
+		})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("call %d: expected context.DeadlineExceeded, got %v", i+1, err)
+		}
+	}
+
+	if state := reg.State(key); state != gobreaker.StateClosed {
+		t.Errorf("breaker must stay closed after client deadline expiry, got %v", state)
+	}
+}
+
 // waitFor polls cond until it returns true or the timeout elapses. Used to
 // observe the open→half-open transition deterministically without sleeping the
 // full recovery timeout.

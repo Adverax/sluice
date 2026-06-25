@@ -3,10 +3,7 @@
 Entry point for the sluice gateway service. It wires all components together
 via dependency injection (ADR-0008) and boots a production-ready HTTP server
 with structured logging, health/readiness probes, OpenAPI request validation,
-and graceful shutdown.
-
-Business behaviour (rate limiting, cache, circuit breaker, metering, metrics)
-is delivered by later cards.
+resilience (retry + circuit breaker), and graceful shutdown.
 
 ## Startup sequence
 
@@ -23,23 +20,27 @@ is delivered by later cards.
    dependency clients; deferred close registered immediately.
 7. `healthHandler.Register(NewRedisChecker(...), NewPostgresChecker(...))` —
    wires real ping checks for `/readyz` (AC-027/AC-028).
-8. `server.New(router, healthHandler, logger)` → `srv.Handler(appMux)` —
-   builds the generated `api.StrictServerInterface` implementation and wraps
-   all routes with a kin-openapi request-validation middleware (ADR-0011);
-   invalid requests are rejected 400 before reaching any handler.
-9. Build `http.Server` with all timeouts from config (NFR-004).
-10. `lifecycle.New(...)` — wraps the server with graceful-drain logic (FR-012).
-11. Compose middleware: `logging.Middleware` → `CountingMiddleware` → routes.
-12. `signal.NotifyContext` on SIGINT/SIGTERM → `manager.Run(ctx)`.
-
-All routes (including `/healthz` and `/readyz`) are registered through the
-generated `api.HandlerFromMux` boundary and served through the validation
-middleware. Probe requests are not separately counted as in-flight because the
-generated strict handler handles them before `CountingMiddleware` would act.
+8. **Resilience composition (ADR-0006, FR-006/FR-007):**
+   ```
+   retry.New(cfg.Retry, retry.WithNonRetryable(resilience.IsOpenState))
+   breaker.NewRegistry(cfg.Breaker, breaker.WithOnStateChange(logTransition))
+   resilience.New(retrier, breakers, cfg.Breaker.RetryAfter)
+   ```
+   Composition order: `retry( breaker.Execute( providerCall ) )`. The retry engine
+   treats `ErrOpenState` as non-retryable so it never spins against an open breaker.
+9. `server.New(router, healthHandler, logger, server.WithInferFunc(composer.InferFunc()))` →
+   `srv.Handler(appMux)` — builds the generated `api.StrictServerInterface` with the
+   composed resilience call injected, then wraps all routes with kin-openapi
+   request-validation (ADR-0011).
+10. Build `http.Server` with all timeouts from config (NFR-004).
+11. `lifecycle.New(...)` — wraps the server with graceful-drain logic (FR-012).
+12. Compose middleware (outermost first): `logging.Middleware` → `CountingMiddleware` → routes.
+13. `signal.NotifyContext` on SIGINT/SIGTERM → `manager.Run(ctx)`.
 
 ## Environment variables
 
-See `internal/config/README.md` for the full list of `GATEWAY_*` variables.
+See `internal/config/README.md` for the full list of `GATEWAY_*` variables,
+including `GATEWAY_RETRY_*` and `GATEWAY_BREAKER_*` knobs added in CARD-007.
 
 ## Exit codes
 

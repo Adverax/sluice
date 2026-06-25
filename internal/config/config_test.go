@@ -216,6 +216,98 @@ func TestConfig_ResilienceEnvOverride(t *testing.T) {
 	}
 }
 
+// TestConfig_Load_RejectsBadResilienceEnv covers NFR-004 (fail-loud) for the
+// integer/float resilience knobs: if a value is SET but malformed or negative,
+// Load must return an error rather than silently falling back.
+func TestConfig_Load_RejectsBadResilienceEnv(t *testing.T) {
+	tests := []struct {
+		name    string
+		key     string
+		value   string
+		wantErr bool
+	}{
+		// --- malformed (unparseable) values ---
+		{
+			name:    "malformed GATEWAY_RETRY_MAX_ATTEMPTS",
+			key:     "GATEWAY_RETRY_MAX_ATTEMPTS",
+			value:   "three",
+			wantErr: true,
+		},
+		{
+			name:    "malformed GATEWAY_RETRY_JITTER",
+			key:     "GATEWAY_RETRY_JITTER",
+			value:   "half",
+			wantErr: true,
+		},
+		{
+			name:    "malformed GATEWAY_BREAKER_FAILURE_RATIO",
+			key:     "GATEWAY_BREAKER_FAILURE_RATIO",
+			value:   "fifty_percent",
+			wantErr: true,
+		},
+		{
+			name:    "malformed GATEWAY_BREAKER_MAX_REQUESTS",
+			key:     "GATEWAY_BREAKER_MAX_REQUESTS",
+			value:   "five",
+			wantErr: true,
+		},
+		{
+			name:    "malformed GATEWAY_BREAKER_MIN_REQUESTS",
+			key:     "GATEWAY_BREAKER_MIN_REQUESTS",
+			value:   "ten",
+			wantErr: true,
+		},
+		// --- negative / non-positive values for count fields (would wrap to ~4e9) ---
+		{
+			name:    "negative GATEWAY_RETRY_MAX_ATTEMPTS",
+			key:     "GATEWAY_RETRY_MAX_ATTEMPTS",
+			value:   "-1",
+			wantErr: true,
+		},
+		{
+			name:    "zero GATEWAY_RETRY_MAX_ATTEMPTS",
+			key:     "GATEWAY_RETRY_MAX_ATTEMPTS",
+			value:   "0",
+			wantErr: true,
+		},
+		{
+			name:    "negative GATEWAY_BREAKER_MAX_REQUESTS",
+			key:     "GATEWAY_BREAKER_MAX_REQUESTS",
+			value:   "-5",
+			wantErr: true,
+		},
+		{
+			name:    "negative GATEWAY_BREAKER_MIN_REQUESTS",
+			key:     "GATEWAY_BREAKER_MIN_REQUESTS",
+			value:   "-10",
+			wantErr: true,
+		},
+		// --- valid overrides must still load cleanly ---
+		{
+			name:    "valid GATEWAY_RETRY_MAX_ATTEMPTS",
+			key:     "GATEWAY_RETRY_MAX_ATTEMPTS",
+			value:   "5",
+			wantErr: false,
+		},
+		{
+			name:    "valid GATEWAY_BREAKER_FAILURE_RATIO",
+			key:     "GATEWAY_BREAKER_FAILURE_RATIO",
+			value:   "0.75",
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(tt.key, tt.value)
+			_, err := Load()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Load() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 // TestConfig_ResilienceValidation covers the new validation rules.
 func TestConfig_ResilienceValidation(t *testing.T) {
 	tests := []struct {

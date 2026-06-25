@@ -17,6 +17,7 @@ package breaker
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/sony/gobreaker"
@@ -136,20 +137,51 @@ func (r *Registry) State(key string) gobreaker.State {
 
 // Execute runs call through the breaker keyed by key. In the open state it
 // returns ErrOpenState immediately without invoking call (fast-fail, AC-022).
-// gobreaker counts a returned error as a failure; ctx-cancellation errors are
-// surfaced but still recorded — that is acceptable for v1 (a cancelled upstream
-// is a failed call from the breaker's perspective).
+//
+// Client-originated cancellation / deadline (context.Canceled,
+// context.DeadlineExceeded) is NOT counted as a provider failure: a client
+// hanging up or timing out is not the provider's fault and must not trip a
+// healthy provider's breaker. We achieve this by wrapping such errors in a
+// sentinel that gobreaker's IsSuccessful hook treats as a success, then
+// unwrapping them after Execute returns so the original ctx error propagates
+// to the caller unchanged.
 func (r *Registry) Execute(ctx context.Context, key string, call Call) (provider.Response, error) {
 	cb := r.get(key)
+
+	// ctxErr wraps a context error so gobreaker counts the call as a non-failure.
+	// It carries the original error so we can unwrap it after Execute.
+	type ctxErr struct{ cause error }
+	// ctxErrSentinel is returned from the inner func to signal "treat as success
+	// for accounting purposes, but propagate the real error to the caller".
+	// We implement this by setting IsSuccessful on the Settings (see below), but
+	// gobreaker does not allow per-Execute overrides; the simpler approach is to
+	// store the ctx error in the interface{} result and NOT return an error so
+	// gobreaker counts it as a success, then detect it on the res side.
 	res, err := cb.Execute(func() (interface{}, error) {
-		return call(ctx)
+		resp, callErr := call(ctx)
+		if callErr != nil && (errors.Is(callErr, context.Canceled) || errors.Is(callErr, context.DeadlineExceeded)) {
+			// Return the ctx error inside the result (not as the error return)
+			// so gobreaker records this as a successful call and does NOT
+			// increment its failure counter.
+			return ctxErr{cause: callErr}, nil
+		}
+		return resp, callErr
 	})
 	if err != nil {
-		// res is nil on ErrOpenState/ErrTooManyRequests or on a call error.
+		// res may be nil (ErrOpenState / ErrTooManyRequests) or a provider.Response
+		// when gobreaker's half-open probe itself observed an error — use comma-ok.
 		if resp, ok := res.(provider.Response); ok {
 			return resp, err
 		}
 		return provider.Response{}, err
 	}
-	return res.(provider.Response), nil
+	// Unwrap a context-originated error that was hidden from gobreaker's counter.
+	if ce, ok := res.(ctxErr); ok {
+		return provider.Response{}, ce.cause
+	}
+	// Happy path: res must be a provider.Response — use comma-ok for safety.
+	if resp, ok := res.(provider.Response); ok {
+		return resp, nil
+	}
+	return provider.Response{}, nil
 }
