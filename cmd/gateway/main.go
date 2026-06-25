@@ -206,11 +206,16 @@ func run() error {
 		IdleTimeout:  cfg.Server.IdleTimeout,
 	}
 
-	manager := lifecycle.New(httpServer, logger, cfg.Server.ShutdownTimeout)
+	manager := lifecycle.New(httpServer, logger, cfg.Server.ShutdownTimeout,
+		// Give each OnShutdown hook (e.g. the metering worker's Close) its own
+		// independent deadline so a forced HTTP drain does not starve the flush
+		// (GATEWAY_SHUTDOWN_HOOK_TIMEOUT, default 5s — AC-032 / FR-012).
+		lifecycle.WithHookTimeout(cfg.Shutdown.HookTimeout),
+	)
 
 	// Flush remaining buffered usage events on shutdown, AFTER the HTTP drain so
 	// no new events are being enqueued by the time Close drains the buffer
-	// (AC-032 / FR-012). The hook shares the lifecycle shutdown deadline.
+	// (AC-032 / FR-012). The hook runs with its own fresh-deadline context.
 	manager.OnShutdown(meteringWorker.Close)
 
 	// Rate-limit middleware (COMP-008/COMP-009, FR-004, ADR-0001/ADR-0006/ADR-0010).

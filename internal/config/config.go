@@ -90,6 +90,15 @@ const (
 	// FlushInterval is the worker's periodic flush trigger.
 	defaultMeteringBufferSize    = 1000
 	defaultMeteringFlushInterval = 5 * time.Second
+
+	// defaultShutdownHookTimeout is the deadline given to EACH post-drain
+	// OnShutdown hook (e.g. the metering worker's Close). It is independent of
+	// the HTTP drain deadline so a forced drain (server.Shutdown hitting its own
+	// deadline) does not consume the budget available to the hooks. 5s is
+	// generous enough for a Postgres flush batch while still bounding total
+	// shutdown time (NFR-005). Configurable via GATEWAY_SHUTDOWN_HOOK_TIMEOUT
+	// (fail-loud).
+	defaultShutdownHookTimeout = 5 * time.Second
 )
 
 // Server holds the timeouts applied to the inbound *http.Server boundary
@@ -222,6 +231,16 @@ type Metering struct {
 	FlushInterval time.Duration
 }
 
+// Shutdown holds lifecycle shutdown tuning parameters.
+type Shutdown struct {
+	// HookTimeout is the deadline given to EACH post-drain OnShutdown hook
+	// (e.g. the metering worker's Close). It runs from a FRESH context
+	// (context.Background()) so an expired HTTP-drain deadline cannot starve
+	// the hooks. Must be > 0. Configurable via GATEWAY_SHUTDOWN_HOOK_TIMEOUT
+	// (fail-loud). Default 5s.
+	HookTimeout time.Duration
+}
+
 // Config is the fully-resolved service configuration.
 type Config struct {
 	Server    Server
@@ -234,6 +253,7 @@ type Config struct {
 	RateLimit RateLimit
 	Cache     Cache
 	Metering  Metering
+	Shutdown  Shutdown
 
 	// HealthCheckTimeout is the per-check deadline passed to each individual
 	// readiness checker. Keeping it separate from the Redis/Postgres timeouts
@@ -353,6 +373,9 @@ func Load() (*Config, error) {
 			BufferSize:    mustPositiveInt("GATEWAY_METERING_BUFFER_SIZE", defaultMeteringBufferSize),
 			FlushInterval: mustDuration("GATEWAY_METERING_FLUSH_INTERVAL", defaultMeteringFlushInterval),
 		},
+		Shutdown: Shutdown{
+			HookTimeout: mustDuration("GATEWAY_SHUTDOWN_HOOK_TIMEOUT", defaultShutdownHookTimeout),
+		},
 		HealthCheckTimeout: mustDuration("GATEWAY_HEALTH_CHECK_TIMEOUT", defaultHealthCheckTimeout),
 		WorkerPoolSize:     mustPositiveInt("GATEWAY_WORKER_POOL_SIZE", defaultWorkerPoolSize),
 	}
@@ -398,6 +421,7 @@ func (c *Config) Validate() error {
 		{"rateLimit.Window", c.RateLimit.Window},
 		{"cache.TTL", c.Cache.TTL},
 		{"metering.FlushInterval", c.Metering.FlushInterval},
+		{"shutdown.HookTimeout", c.Shutdown.HookTimeout},
 	}
 	for _, t := range timeouts {
 		if t.value <= 0 {

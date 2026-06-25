@@ -302,6 +302,113 @@ func TestGracefulShutdown_TimeoutForced(t *testing.T) {
 	}
 }
 
+// TestOnShutdown_HookRunsOnForcedPath asserts that OnShutdown hooks (e.g. the
+// metering worker's Close — AC-032) execute even when the HTTP drain was FORCED
+// (server.Shutdown returned context.DeadlineExceeded). The hook must run with
+// its own fresh-deadline context, independent of the exhausted drain context.
+func TestOnShutdown_HookRunsOnForcedPath(t *testing.T) {
+	const n = 2
+	const handlerBlock = 5 * time.Second
+	const shutdownTimeout = 100 * time.Millisecond
+	const hookTimeout = 2 * time.Second
+
+	logBuf := &syncBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logBuf, nil))
+
+	release := make(chan struct{})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-time.After(handlerBlock):
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	addr := freeAddr(t)
+	server := &http.Server{Addr: addr}
+	mgr := New(server, logger, shutdownTimeout,
+		WithHookTimeout(hookTimeout),
+	)
+	server.Handler = mgr.CountingMiddleware(handler)
+
+	var hookRan int64
+	mgr.OnShutdown(func(ctx context.Context) error {
+		// Record that the hook was called. The ctx here must NOT be expired
+		// even though the HTTP drain timed out.
+		if ctx.Err() != nil {
+			return fmt.Errorf("hook context already expired: %w", ctx.Err())
+		}
+		atomic.AddInt64(&hookRan, 1)
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- mgr.Run(ctx) }()
+
+	// Wait for the server to accept connections.
+	dialDeadline := time.Now().Add(5 * time.Second)
+	for {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			break
+		}
+		if time.Now().After(dialDeadline) {
+			t.Fatal("server never started accepting connections")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Fire requests that will block past the drain timeout.
+	client := &http.Client{Timeout: 30 * time.Second}
+	for i := 0; i < n; i++ {
+		go func() {
+			resp, err := client.Get(fmt.Sprintf("http://%s/", addr))
+			if err == nil {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+			}
+		}()
+	}
+
+	// Wait until all n are in-flight, then trigger shutdown.
+	deadline := time.Now().Add(5 * time.Second)
+	for atomic.LoadInt64(&mgr.inFlight) < int64(n) {
+		if time.Now().After(deadline) {
+			t.Fatalf("requests never all became in-flight: got %d/%d", mgr.InFlight(), n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel() // trigger shutdown — drain will be forced because handlers are blocked
+
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run returned error on forced shutdown (want nil): %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after forced shutdown")
+	}
+
+	// Release the blocked handlers so their goroutines exit cleanly.
+	close(release)
+
+	// The forced-shutdown log line must be present.
+	logs := logBuf.String()
+	want := fmt.Sprintf("forced shutdown: %d requests unfinished", n)
+	if !bytesContains(logs, want) {
+		t.Errorf("log does not contain %q\nlogs:\n%s", want, logs)
+	}
+
+	// The hook MUST have run — this is the core assertion of the test.
+	if atomic.LoadInt64(&hookRan) != 1 {
+		t.Errorf("shutdown hook ran %d times on forced path, want 1", atomic.LoadInt64(&hookRan))
+	}
+}
+
 // freeAddr returns a free 127.0.0.1:<port> address by briefly binding an
 // ephemeral port and immediately releasing it. There is a small TOCTOU window
 // but it is negligible in practice for loopback test addresses.
