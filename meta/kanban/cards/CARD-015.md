@@ -1,6 +1,6 @@
 # CARD-015: Conformance tweaks (token-bucket, buffer-size metric, drained/flushed log)
 
-**Status:** ready
+**Status:** done
 **Priority:** P2
 **Category:** tech-debt
 **Estimate:** 1d
@@ -11,11 +11,11 @@
 **Worktree:** —
 **Source:** doc/requirements-audit.md (gap #5: minor spec-conformance items)
 **Depends on:** CARD-005, CARD-010
-**Review score:** —
-**Started:** —
-**Closed:** —
-**Actual:** —
-**Merge commit:** —
+**Review score:** 9.0 (1 cycle; 0 critical/important; AC-015a–c ✓; integration live-green)
+**Started:** 2026-06-25T14:24:09Z
+**Closed:** 2026-06-25T14:46:27Z
+**Actual:** 0.1d
+**Merge commit:** a24b58d
 **Blocked by:** —
 
 ## What to implement

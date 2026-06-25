@@ -11,11 +11,9 @@ _none_
 
 ---
 
-## In Progress (1)
+## In Progress (0)
 
-| CARD | Title | Phase | Pri | Est | Branch |
-|------|-------|-------|-----|-----|--------|
-| CARD-015 | Conformance: Redis token-bucket, metering_buffer_size metric, drained/flushed log | implementation | P2 | 1d | card/015-conformance-tweaks |
+_none_
 
 ---
 
@@ -25,7 +23,7 @@ _none_
 
 ---
 
-## Done (14)
+## Done (15)
 
 | CARD | Title | Pri | Score | Actual | Merge |
 |------|-------|-----|-------|--------|-------|
@@ -43,6 +41,7 @@ _none_
 | CARD-011 | Load test, race-suite, CI & make up | P2 | 9.5 | 0.1d | b0e400b |
 | CARD-013 | HTTP provider adapter + pooled client (gap #4) | P1 | 9.5 | 0.1d | fa69f1b |
 | CARD-014 | Streaming through resilience seam (gap #3) | P1 | 8.5 | 0.1d | 9770321 |
+| CARD-015 | Conformance: token-bucket, buffer-size metric, drained/flushed log (gap #5) | P2 | 9.0 | 0.1d | a24b58d |
 
 ---
 
