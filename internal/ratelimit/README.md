@@ -8,8 +8,12 @@ distributed-limit ACL (ADR-0010).
 1. **Local token bucket** — `Registry` over `golang.org/x/time/rate`, one bucket per key.
    Fast path, no network. Rate/burst from `GATEWAY_RATELIMIT_RPS` / `_BURST`.
 2. **Distributed cap** — `RateLimitRepository` port enforcing one global limit across
-   gateway instances. `redisrepo` (go-redis/v9) implements it with an atomic Lua
-   `INCR + PEXPIRE + PTTL` fixed window; `memrepo` is an in-memory equivalent (single
+   gateway instances. `redisrepo` (go-redis/v9) implements it as an atomic Lua **token
+   bucket** (per key it stores `{tokens, last_refill_ts}`, refills
+   `tokens = min(burst, tokens + elapsed·rate)`, allows iff `tokens >= 1`, with a TTL so
+   idle keys self-evict). Rate is `limit/window`; burst comes from `WithBurst`
+   (reuses `GATEWAY_RATELIMIT_BURST`). `now` is passed from Go so the refill is
+   deterministic and testable. `memrepo` is an in-memory fixed-window equivalent (single
    instance / tests). A request must pass **both** tiers.
 
 ## Bounded registry (no unbounded growth)

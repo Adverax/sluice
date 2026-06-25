@@ -409,6 +409,107 @@ func TestOnShutdown_HookRunsOnForcedPath(t *testing.T) {
 	}
 }
 
+// TestGracefulShutdown_LogsDrainedAndFlushed covers AC-015c: on graceful
+// shutdown the log reports BOTH the drained in-flight requests AND the count of
+// usage events flushed during shutdown (supplied by WithFlushedCountFn, wired in
+// cmd/gateway to the metering worker's FlushedOnShutdown). The flushed count is
+// read AFTER the shutdown hooks run, so this test registers a hook that "flushes"
+// and a count fn that reports what the hook flushed.
+func TestGracefulShutdown_LogsDrainedAndFlushed(t *testing.T) {
+	const n = 4
+	const latency = 150 * time.Millisecond
+	const flushedEvents = 9
+
+	logBuf := &syncBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logBuf, nil))
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(latency)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok")
+	})
+
+	addr := freeAddr(t)
+	server := &http.Server{Addr: addr}
+
+	// The hook simulates the metering worker's Close draining the buffer; the
+	// count fn (read post-hooks) reports how many events it flushed.
+	var flushed int64
+	mgr := New(server, logger, 10*time.Second,
+		WithFlushedCountFn(func() int { return int(atomic.LoadInt64(&flushed)) }),
+	)
+	mgr.OnShutdown(func(ctx context.Context) error {
+		atomic.StoreInt64(&flushed, flushedEvents)
+		return nil
+	})
+	server.Handler = mgr.CountingMiddleware(handler)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- mgr.Run(ctx) }()
+
+	// Wait until the server is accepting connections.
+	dialDeadline := time.Now().Add(5 * time.Second)
+	for {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			break
+		}
+		if time.Now().After(dialDeadline) {
+			t.Fatal("server never started accepting connections")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := client.Get(fmt.Sprintf("http://%s/", addr))
+			if err == nil {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+			}
+		}()
+	}
+
+	// Wait until all n requests are in-flight, then cancel ctx (simulate SIGTERM).
+	deadline := time.Now().Add(5 * time.Second)
+	for atomic.LoadInt64(&mgr.inFlight) < int64(n) {
+		if time.Now().After(deadline) {
+			t.Fatalf("requests never all became in-flight: got %d/%d", mgr.InFlight(), n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	wg.Wait()
+
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run returned error (want nil / exit 0): %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+
+	logs := logBuf.String()
+	// The drained-requests line must still be present (unchanged AC-031/AC-046).
+	if want := fmt.Sprintf("drained %d requests", n); !bytesContains(logs, want) {
+		t.Errorf("log does not contain %q\nlogs:\n%s", want, logs)
+	}
+	// And the flushed-events count must appear alongside it (AC-015c).
+	if want := fmt.Sprintf("flushed %d usage events", flushedEvents); !bytesContains(logs, want) {
+		t.Errorf("log does not contain %q\nlogs:\n%s", want, logs)
+	}
+}
+
 // freeAddr returns a free 127.0.0.1:<port> address by briefly binding an
 // ephemeral port and immediately releasing it. There is a small TOCTOU window
 // but it is negligible in practice for loopback test addresses.

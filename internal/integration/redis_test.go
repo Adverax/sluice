@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -95,39 +96,54 @@ func TestIntegration_CacheRedisRepo(t *testing.T) {
 	}
 }
 
-// TestIntegration_RateLimitRedisDistributed proves the DISTRIBUTED fixed-window
-// cap (COMP-009, FR-004, AC-013): two RedisRepository instances sharing ONE
-// Redis must enforce a SINGLE global counter — the Lua INCR+PEXPIRE+PTTL script
-// makes the increment atomic so interleaved requests from "two gateways" see a
-// consistent count. We alternate the two instances against the same key and
-// assert exactly `limit` requests are allowed within the window, the rest
-// rejected with a positive Retry-After.
+// TestIntegration_RateLimitRedisDistributed proves the DISTRIBUTED token bucket
+// (COMP-009, FR-004, AC-015a / AC-013) against REAL Redis: two RedisRepository
+// instances sharing ONE Redis enforce a SINGLE shared bucket — the atomic Lua
+// token-bucket script makes the refill+decrement race-free so interleaved
+// requests from "two gateways" see one consistent balance. We drive the bucket
+// with an INJECTED CLOCK (WithClock) so the test is deterministic and needs no
+// real sleeps: the elapsed time the script refills against is the clock delta we
+// control, not wall-clock.
 func TestIntegration_RateLimitRedisDistributed(t *testing.T) {
 	requireDocker(t)
 	uri, teardown := startRedis(t)
 	defer teardown()
 
+	// Shared injected clock: both repos refill against the same controlled time
+	// so we can advance "time" without sleeping.
+	clk := time.Unix(1_700_000_000, 0)
+	var clkMu sync.Mutex
+	clock := func() time.Time {
+		clkMu.Lock()
+		defer clkMu.Unlock()
+		return clk
+	}
+	advance := func(d time.Duration) {
+		clkMu.Lock()
+		defer clkMu.Unlock()
+		clk = clk.Add(d)
+	}
+
+	const (
+		key    = "tenant-x"
+		burst  = 6
+		limit  = 6 // rate = 6/s
+		window = time.Second
+	)
+
 	// Two independent clients → two repo instances, as if two gateway processes
-	// shared the same Redis.
+	// shared the same Redis. Both share the burst and clock.
 	clientA := dialRedis(t, uri)
 	clientB := dialRedis(t, uri)
-	repoA := ratelimit.NewRedisRepository(clientA)
-	repoB := ratelimit.NewRedisRepository(clientB)
+	repoA := ratelimit.NewRedisRepository(clientA,
+		ratelimit.WithBurst(burst), ratelimit.WithRedisClock(clock))
+	repoB := ratelimit.NewRedisRepository(clientB,
+		ratelimit.WithBurst(burst), ratelimit.WithRedisClock(clock))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	const (
-		key    = "tenant-x"
-		limit  = 6
-		window = 5 * time.Second
-	)
-
-	allowed := 0
-	rejected := 0
-	var lastRetryAfter time.Duration
-	for i := 0; i < limit*2; i++ {
-		// Alternate between the two "gateways" to prove the shared global cap.
+	allow := func(i int) (bool, time.Duration) {
 		repo := repoA
 		if i%2 == 1 {
 			repo = repoB
@@ -136,21 +152,47 @@ func TestIntegration_RateLimitRedisDistributed(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Allow #%d: %v", i, err)
 		}
-		if dec.Allowed {
+		return dec.Allowed, dec.RetryAfter
+	}
+
+	// Phase 1 — immediate burst at t0: the shared bucket starts full (burst
+	// tokens). Alternating 2*burst requests across both instances must admit
+	// EXACTLY burst, the rest rejected with a positive Retry-After.
+	allowed, rejected := 0, 0
+	var lastRetryAfter time.Duration
+	for i := 0; i < burst*2; i++ {
+		ok, ra := allow(i)
+		if ok {
 			allowed++
 		} else {
 			rejected++
-			lastRetryAfter = dec.RetryAfter
+			lastRetryAfter = ra
 		}
 	}
-
-	if allowed != limit {
-		t.Fatalf("allowed = %d, want %d (distributed cap not shared)", allowed, limit)
+	if allowed != burst {
+		t.Fatalf("phase 1 burst: allowed = %d, want %d (distributed bucket not shared)", allowed, burst)
 	}
-	if rejected != limit {
-		t.Fatalf("rejected = %d, want %d", rejected, limit)
+	if rejected != burst {
+		t.Fatalf("phase 1 burst: rejected = %d, want %d", rejected, burst)
 	}
 	if lastRetryAfter <= 0 {
 		t.Fatalf("Retry-After = %s, want > 0 on rejection", lastRetryAfter)
+	}
+
+	// Phase 2 — steady state: advance the shared clock by one full window so
+	// `rate` tokens refill (capped at burst). Another 2*burst alternating
+	// requests must again admit no more than burst, and at least one.
+	advance(window)
+	allowed = 0
+	for i := 0; i < burst*2; i++ {
+		if ok, _ := allow(i); ok {
+			allowed++
+		}
+	}
+	if allowed > burst {
+		t.Fatalf("phase 2 steady-state: allowed = %d, want <= %d (refill capped at burst)", allowed, burst)
+	}
+	if allowed == 0 {
+		t.Fatal("phase 2 steady-state: allowed = 0 after a full-window refill, want > 0")
 	}
 }
