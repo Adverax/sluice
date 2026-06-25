@@ -1,6 +1,6 @@
 # CARD-010: Async usage metering → Postgres
 
-**Status:** ready
+**Status:** done
 **Priority:** P2
 **Category:** feature
 **Estimate:** 2d
@@ -11,11 +11,11 @@
 **Worktree:** —
 **Source:** meta/architecture/handoff.md#increment-4
 **Depends on:** CARD-003, CARD-001
-**Review score:** —
-**Started:** —
-**Closed:** —
-**Actual:** —
-**Merge commit:** —
+**Review score:** 9.5 (2 cycles; cycle-1 minor: forced-shutdown flush no-op, fixed; 5 ACs ✓)
+**Started:** 2026-06-25T11:55:20Z
+**Closed:** 2026-06-25T12:26:41Z
+**Actual:** 0.1d
+**Merge commit:** 86f2f21
 **Blocked by:** —
 
 ## What to implement

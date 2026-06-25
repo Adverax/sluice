@@ -14,11 +14,9 @@
 
 ---
 
-## In Progress (1)
+## In Progress (0)
 
-| CARD | Title | Phase | Pri | Est | Branch |
-|------|-------|-------|-----|-----|--------|
-| CARD-010 | Async usage metering → Postgres | implementation | P2 | 2d | card/010-async-metering |
+_none_
 
 ---
 
@@ -28,7 +26,7 @@ _none_
 
 ---
 
-## Done (10)
+## Done (11)
 
 | CARD | Title | Pri | Score | Actual | Merge |
 |------|-------|-----|-------|--------|-------|
@@ -42,6 +40,7 @@ _none_
 | CARD-009 | Observability: metrics, tracing, panic recovery | P1 | 9.5 | 0.1d | 90cb4b6 |
 | CARD-004 | SSE streaming & context cancellation | P1 | 9.0 | 0.1d | 9f09517 |
 | CARD-006 | Response cache (Redis, TTL + per-request override) | P2 | 9.0 | 0.1d | 2a25abf |
+| CARD-010 | Async usage metering → Postgres | P2 | 9.5 | 0.1d | 86f2f21 |
 
 ---
 
