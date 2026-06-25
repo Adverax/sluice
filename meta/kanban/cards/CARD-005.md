@@ -1,6 +1,6 @@
 # CARD-005: Per-key rate limiting (local→Redis) + ephemeral key
 
-**Status:** ready
+**Status:** done
 **Priority:** P1
 **Category:** feature
 **Estimate:** 2.5d
@@ -11,11 +11,11 @@
 **Worktree:** —
 **Source:** meta/architecture/handoff.md#increment-2
 **Depends on:** CARD-003
-**Review score:** —
-**Started:** —
-**Closed:** —
-**Actual:** —
-**Merge commit:** —
+**Review score:** 8.5 (2 cycles; cycle-1 2 important: unbounded-registry DoS + cookie-bypass, fixed; 4 ACs ✓)
+**Started:** 2026-06-25T09:59:23Z
+**Closed:** 2026-06-25T10:27:13Z
+**Actual:** 0.1d
+**Merge commit:** 2c406a2
 **Blocked by:** —
 
 ## What to implement
