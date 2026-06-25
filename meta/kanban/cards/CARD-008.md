@@ -1,6 +1,6 @@
 # CARD-008: Bounded worker pool & backpressure
 
-**Status:** ready
+**Status:** done
 **Priority:** P1
 **Category:** feature
 **Estimate:** 2d
@@ -11,11 +11,11 @@
 **Worktree:** —
 **Source:** meta/architecture/handoff.md#increment-3
 **Depends on:** CARD-003
-**Review score:** —
-**Started:** —
-**Closed:** —
-**Actual:** —
-**Merge commit:** —
+**Review score:** 9.0 (1 cycle; 0 critical/important; AC-038/039/047 ✓)
+**Started:** 2026-06-25T09:46:10Z
+**Closed:** 2026-06-25T09:57:33Z
+**Actual:** 0.1d
+**Merge commit:** 18ee178
 **Blocked by:** —
 
 ## What to implement
