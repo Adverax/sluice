@@ -126,7 +126,7 @@ Each pattern maps to the package/file that implements it:
 | Pattern | Where | Notes |
 |---------|-------|-------|
 | **Rate limiting** | [`internal/ratelimit/`](internal/ratelimit/), [`internal/middleware/ratelimit.go`](internal/middleware/ratelimit.go) | Local token bucket + **distributed** Redis fixed-window (atomic Lua, shared cross-instance cap, AC-013); fails open to local on a Redis blip. |
-| **Ephemeral upstream credentials** | [`cmd/gateway/main.go`](cmd/gateway/main.go) (`newUpstreamClient`), [`internal/provider/`](internal/provider/) | Provider credentials live behind the ACL boundary (ADR-0009) and are attached per upstream call by the provider adapter — never logged, never on the client-facing contract. |
+| **Ephemeral API keys** | [`internal/middleware/ratelimit.go`](internal/middleware/ratelimit.go) | A keyless caller is minted a crypto-random key (returned via `X-Sluice-Api-Key` + cookie) and gets its own rate-limit bucket — no noisy-neighbour, no auth backend required (ADR-0001). |
 | **Retries (exponential backoff + jitter)** | [`internal/proxy/retry/`](internal/proxy/retry/) | Bounded attempts; treats an open breaker as non-retryable. |
 | **Circuit breaker** | [`internal/breaker/`](internal/breaker/), [`internal/proxy/resilience/`](internal/proxy/resilience/) | Per-provider `gobreaker`; open → fast-fail 503 + Retry-After. |
 | **Bounded worker pool / backpressure** | [`internal/pool/`](internal/pool/) | Reject-before-work semaphore caps concurrent upstream calls; saturation → 503 (never blocks, never leaks goroutines). |
@@ -135,6 +135,50 @@ Each pattern maps to the package/file that implements it:
 | **Graceful shutdown** | [`internal/lifecycle/`](internal/lifecycle/) | Drains in-flight requests, then runs shutdown hooks (flush the metering buffer) under their own deadlines. |
 | **Panic recovery** | [`internal/middleware/recover.go`](internal/middleware/recover.go) | Outermost middleware: a handler panic → 500, process survives. |
 | **Metrics + tracing** | [`internal/metrics/`](internal/metrics/), [`internal/tracing/`](internal/tracing/), [`internal/middleware/tracing.go`](internal/middleware/tracing.go) | 7 Prometheus series at `/metrics` (requests, latency, in-flight, provider latency, rate-limit rejections, breaker state, dropped metering events) + OTLP spans. |
+
+---
+
+## Tech decisions
+
+A few choices that define the repo's character (the full rationale lives in
+[`meta/architecture/decisions/`](meta/architecture/decisions/adr/)):
+
+- **`net/http` + ServeMux, no framework** (CON-001). Go's 1.22+ ServeMux covers the routing
+  this gateway needs; a framework would add magic and dependency weight for no real gain.
+- **Contract-first OpenAPI + `oapi-codegen`** (ADR-0011). `api/openapi.yaml` is the single
+  source of truth; the typed server boundary is generated onto the plain ServeMux and requests
+  are schema-validated at the edge — the discipline of a contract without the weight of a framework.
+- **Reject-before-work backpressure** (worker pool as a non-blocking semaphore, ADR-0003).
+  When the pool is full the request is rejected *immediately* (503 + `Retry-After`) — never queued.
+  A queue would mask overload and grow goroutines without bound; immediate shedding keeps latency
+  and memory flat under 3× load.
+- **`retry(breaker(provider))` composition** (ADR-0006). The breaker sits *inside* retry, so an
+  open breaker fast-fails without burning retry attempts, and we never retry into a tripped breaker —
+  the failure signals "switch provider," not "hammer harder."
+- **Async, drop-on-full metering** (ADR-0007). Usage events go to a bounded channel with a
+  non-blocking send; the hot path never waits on Postgres. Under overload, events are dropped and
+  counted (`metering_events_dropped_total`) rather than slowing requests — best-effort by design.
+- **Rate limiter fails *open*** on a Redis error. A proxy's job is availability; a Redis blip
+  must not 503 the whole fleet, so enforcement degrades to the local token bucket and logs a warning.
+- **`pgx`/`go-redis` directly, no ORM** (ADR-0010). Explicit SQL and an injected repository
+  interface per context — no hidden queries, swappable client, testable without a live DB.
+
+## What I'd add for production
+
+This is a focused reference build; the honest gaps a real deployment would close (most are scored in
+[`meta/kanban/backlog.md`](meta/kanban/backlog.md)):
+
+- **Real provider adapters** (OpenAI / Anthropic) behind the existing `Provider` interface — v1 ships
+  a controllable *mock* upstream (over real HTTP, so connection pooling and cancellation are genuinely
+  exercised), which keeps load tests reproducible.
+- **Real authentication** — v1 treats the API key as an identifier only (no validation backend), plus a
+  per-source-IP cap on ephemeral-key issuance to close the rate-limit bypass.
+- **Fallback-provider routing** on an open breaker (multi-provider failover) — today a tripped breaker
+  fast-fails; with multiple providers it would reroute.
+- **Billing-grade metering durability** — a WAL / Kafka in front of Postgres so usage is never dropped
+  under overload (v1 is best-effort drop-on-full).
+- **Sliding-window distributed rate limiting** (v1's Redis tier is a fixed window), multi-region
+  deployment, and persistent configuration for routes / per-key limits.
 
 ---
 

@@ -1,6 +1,6 @@
 # sluice — Kanban Board
 
-> 12 cards · ~24d total · 6 waves · **v1 FEATURE-COMPLETE (12/12 done)**
+> 12 cards v1 (all done) + hardening wave (CARD-013/014/015 from the requirements audit)
 > Gantt: [meta/kanban/gantt.md](gantt.md)
 
 ---
@@ -11,9 +11,18 @@ _none_
 
 ---
 
-## In Progress (0)
+## In Progress (1)
 
-_none_
+| CARD | Title | Phase | Pri | Est | Branch |
+|------|-------|-------|-----|-----|--------|
+| CARD-013 | HTTP provider adapter + pooled client | implementation | P1 | 2d | card/013-http-provider-pooled-client |
+
+## Hardening wave (audit gaps) — ready
+
+| CARD | Title | Gap | Pri |
+|------|-------|-----|-----|
+| CARD-014 | Streaming through resilience (breaker/pool + metrics/span) | #3 | P1 |
+| CARD-015 | Conformance: Redis token-bucket, metering_buffer_size metric, drained/flushed log | #5 | P2 |
 
 ---
 
