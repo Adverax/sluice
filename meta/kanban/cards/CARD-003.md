@@ -1,6 +1,6 @@
 # CARD-003: Non-streaming proxy, router, health & timeouts
 
-**Status:** ready
+**Status:** done
 **Priority:** P1
 **Category:** feature
 **Estimate:** 2.5d
@@ -11,11 +11,11 @@
 **Worktree:** —
 **Source:** meta/architecture/handoff.md#increment-1
 **Depends on:** CARD-002, CARD-012
-**Review score:** —
-**Started:** —
-**Closed:** —
-**Actual:** —
-**Merge commit:** —
+**Review score:** 9.0 (2 cycles; cycle-1 important: OpenAPI validation now enforced; AC gate all ✓)
+**Started:** 2026-06-25T08:40:15Z
+**Closed:** 2026-06-25T09:09:52Z
+**Actual:** 0.1d
+**Merge commit:** 9593466
 **Blocked by:** —
 
 ## What to implement

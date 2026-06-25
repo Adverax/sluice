@@ -5,18 +5,17 @@
 
 ---
 
-## Ready (8)
+## Ready (7)
 
 | CARD | Title | Status | Pri | Cat | Est | Depends | Skill |
 |------|-------|--------|-----|-----|-----|---------|-------|
-| CARD-003 | Non-streaming proxy, router, health & timeouts | ready | P1 | feature | 2.5d | CARD-002 ✓, CARD-012 ✓ | golang-pro |
-| CARD-004 | SSE streaming & context cancellation | ready | P1 | feature | 2d | CARD-003 | golang-pro |
-| CARD-005 | Per-key rate limiting (local→Redis) + ephemeral key | ready | P1 | feature | 2.5d | CARD-003 | golang-pro |
+| CARD-004 | SSE streaming & context cancellation | ready | P1 | feature | 2d | CARD-003 ✓ | golang-pro |
+| CARD-005 | Per-key rate limiting (local→Redis) + ephemeral key | ready | P1 | feature | 2.5d | CARD-003 ✓ | golang-pro |
 | CARD-006 | Response cache (Redis, TTL + per-request override) | ready | P2 | feature | 1.5d | CARD-003 | golang-pro |
-| CARD-007 | Retries & circuit breaker | ready | P1 | feature | 2.5d | CARD-003 | golang-pro |
+| CARD-007 | Retries & circuit breaker | ready | P1 | feature | 2.5d | CARD-003 ✓ | golang-pro |
 | CARD-008 | Bounded worker pool & backpressure | ready | P1 | feature | 2d | CARD-003 | golang-pro |
-| CARD-009 | Observability: metrics, tracing, panic recovery | ready | P1 | feature | 2.5d | CARD-003 | golang-pro |
-| CARD-010 | Async usage metering → Postgres | ready | P2 | feature | 2d | CARD-003, CARD-001 ✓ | golang-pro |
+| CARD-009 | Observability: metrics, tracing, panic recovery | ready | P1 | feature | 2.5d | CARD-003 ✓ | golang-pro |
+| CARD-010 | Async usage metering → Postgres | ready | P2 | feature | 2d | CARD-003 ✓, CARD-001 ✓ | golang-pro |
 | CARD-011 | Load test, race-suite, CI & make up | ready | P2 | enabler | 2.5d | CARD-007, CARD-008, CARD-009, CARD-010 | golang-pro |
 
 ---
@@ -33,13 +32,14 @@ _none_
 
 ---
 
-## Done (3)
+## Done (4)
 
 | CARD | Title | Pri | Score | Actual | Merge |
 |------|-------|-----|-------|--------|-------|
 | CARD-001 | Service bootstrap & lifecycle | P1 | 9.0 | 0.1d | 9638bf7 |
 | CARD-002 | Provider interface & mock | P1 | 9.0 | 0.1d | e2f2af9 |
 | CARD-012 | OpenAPI contract & codegen scaffolding | P1 | 9.5 | 0.1d | 4fa2d54 |
+| CARD-003 | Non-streaming proxy, router, health & timeouts | P1 | 9.0 | 0.1d | 9593466 |
 
 ---
 
