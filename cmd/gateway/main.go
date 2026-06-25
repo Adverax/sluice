@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/sony/gobreaker"
@@ -27,6 +28,7 @@ import (
 	"github.com/adverax/sluice/internal/health"
 	"github.com/adverax/sluice/internal/lifecycle"
 	"github.com/adverax/sluice/internal/logging"
+	"github.com/adverax/sluice/internal/metrics"
 	"github.com/adverax/sluice/internal/middleware"
 	"github.com/adverax/sluice/internal/pool"
 	"github.com/adverax/sluice/internal/provider"
@@ -35,6 +37,7 @@ import (
 	"github.com/adverax/sluice/internal/proxy/retry"
 	"github.com/adverax/sluice/internal/ratelimit"
 	"github.com/adverax/sluice/internal/server"
+	"github.com/adverax/sluice/internal/tracing"
 )
 
 func main() {
@@ -59,6 +62,29 @@ func run() error {
 		slog.String("log_format", cfg.Logging.Format),
 		slog.String("log_level", cfg.Logging.Level),
 	)
+
+	// Observability (COMP-013/COMP-014, ADR-0008). The Prometheus registry is
+	// constructed here and INJECTED — never the global default — so each process
+	// owns its own metric set. The six required metrics (NFR-007/AC-048) register
+	// against it via promauto.With(reg) inside metrics.New.
+	promRegistry := prometheus.NewRegistry()
+	met := metrics.New(promRegistry)
+
+	// OTel tracing. The OTLP/HTTP endpoint comes from GATEWAY_OTEL_ENDPOINT; if
+	// unset, a no-op tracer is returned so the gateway runs un-traced. The batch
+	// processor exports asynchronously, so a down collector never blocks a request
+	// (AC-050). Shutdown flushes pending spans on graceful drain.
+	tracer := tracing.New(context.Background(), tracing.Config{
+		Endpoint: os.Getenv("GATEWAY_OTEL_ENDPOINT"),
+		Insecure: true,
+	}, logger)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracer.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("tracing shutdown failed", slog.String("error", err.Error()))
+		}
+	}()
 
 	// Reused upstream HTTP client with a tuned Transport and an explicit total
 	// timeout from config (ADR-0010, NFR-004). Real provider adapters (later
@@ -112,6 +138,9 @@ func run() error {
 				slog.String("from", from.String()),
 				slog.String("to", to.String()),
 			)
+			// breaker_state metric (AC-048): map the gobreaker state to the gauge
+			// via the same hook that logs the transition.
+			met.SetBreakerState(name, breakerStateValue(to))
 		}),
 	)
 	composer := resilience.New(retrier, breakers, cfg.Breaker.RetryAfter)
@@ -126,9 +155,20 @@ func run() error {
 	// is unchanged so CARD-005's rate-limit middleware can sit OUTSIDE this layer.
 	guardedInfer := pool.Guard(cfg.WorkerPoolSize, cfg.Breaker.RetryAfter, composer.InferFunc())
 
+	// Instrument the provider-call seam (COMP-013/COMP-014): time it into
+	// provider_request_duration_seconds and wrap it in a nested OTel span that is
+	// a child of the request's root span (AC-030). Tracing is OUTERMOST so the
+	// span covers the metrics timing too; both decorators preserve the InferFunc
+	// signature so the pool→retry→breaker→provider layering is untouched.
+	instrumentedInfer := tracer.InstrumentInferFunc(met.InstrumentInferFunc(guardedInfer))
+
 	// HTTP boundary: implement the generated StrictServerInterface (ADR-0011)
-	// and register all routes on appMux via api.HandlerFromMux (CON-001).
-	srv := server.New(router, healthHandler, logger, server.WithInferFunc(guardedInfer))
+	// and register all routes on appMux via api.HandlerFromMux (CON-001). The
+	// Prometheus registry is injected so GET /metrics serves it (COMP-013).
+	srv := server.New(router, healthHandler, logger,
+		server.WithInferFunc(instrumentedInfer),
+		server.WithMetricsRegistry(promRegistry),
+	)
 	appMux := http.NewServeMux()
 	appHandler := srv.Handler(appMux)
 
@@ -156,16 +196,30 @@ func run() error {
 	rlRepo := ratelimit.NewRedisRepository(redisClient)
 	rateLimiter := middleware.NewRateLimiter(
 		rlRegistry, rlRepo, cfg.RateLimit.RPS, cfg.RateLimit.Window, logger,
+		// ratelimit_rejected_total is incremented at the 429 reject path via the
+		// injected recorder (the middleware never imports Prometheus, ADR-0008).
+		middleware.WithRejectRecorder(met),
 	)
 
-	// Composition order (ADR-0006), outermost first: request logging wraps the
-	// rate-limit middleware (which must run BEFORE any work, so a 429 never
-	// reaches the proxy/pool/provider — INV-004), which wraps the in-flight
-	// counting middleware, which wraps the generated route handler so proxy
-	// requests are drained on shutdown (FR-012 / NFR-005).
-	handler := logging.Middleware(logger)(
-		rateLimiter.Middleware(
-			manager.CountingMiddleware(appHandler),
+	// Composition order (ADR-0006), outermost first:
+	//   recover → logging → tracing → metrics → rate-limit → counting → routes.
+	// Panic recovery is OUTERMOST so a handler panic is translated to a 500 and
+	// the process survives (AC-033); it wraps logging (which logs the panic at
+	// ERROR and re-panics — AC-041). Tracing creates the root span before the
+	// metrics/rate-limit work so the nested provider span is its child (AC-030).
+	// The metrics middleware records http_requests_total + duration and the
+	// inflight gauge around the whole inner chain. Rate-limit still runs BEFORE
+	// any provider/pool work so a 429 never reaches the proxy (INV-004), and the
+	// counting middleware drains in-flight requests on shutdown (FR-012/NFR-005).
+	handler := middleware.Recoverer(logger)(
+		logging.Middleware(logger)(
+			middleware.Tracing(tracer.Tracer())(
+				met.Middleware(
+					rateLimiter.Middleware(
+						manager.CountingMiddleware(appHandler),
+					),
+				),
+			),
 		),
 	)
 	httpServer.Handler = handler
@@ -174,6 +228,20 @@ func run() error {
 	defer stop()
 
 	return manager.Run(ctx)
+}
+
+// breakerStateValue maps a gobreaker.State onto the breaker_state gauge value
+// (0=closed, 1=half-open, 2=open) so the per-provider circuit state is
+// queryable in Prometheus.
+func breakerStateValue(s gobreaker.State) float64 {
+	switch s {
+	case gobreaker.StateHalfOpen:
+		return metrics.BreakerStateHalfOpen
+	case gobreaker.StateOpen:
+		return metrics.BreakerStateOpen
+	default:
+		return metrics.BreakerStateClosed
+	}
 }
 
 // newUpstreamClient builds the reused outbound HTTP client for provider calls

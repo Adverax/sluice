@@ -24,6 +24,8 @@ import (
 
 	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/getkin/kin-openapi/routers/legacy"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/adverax/sluice/internal/api"
 	"github.com/adverax/sluice/internal/health"
@@ -58,6 +60,11 @@ type Server struct {
 	// directly; later cards (FR-007 retry/circuit-breaker) replace it via
 	// WithInferFunc without touching the mapping/routing code (ADR-0006).
 	infer InferFunc
+
+	// metricsRegistry is the injected Prometheus registry exposed at GET /metrics
+	// (COMP-013, ADR-0008). When nil, GetMetrics serves an empty body so the
+	// generated contract is still satisfied without metrics wiring.
+	metricsRegistry *prometheus.Registry
 }
 
 // InferFunc executes a single non-streaming inference against the chosen
@@ -75,6 +82,17 @@ func WithInferFunc(fn InferFunc) Option {
 	return func(s *Server) {
 		if fn != nil {
 			s.infer = fn
+		}
+	}
+}
+
+// WithMetricsRegistry injects the Prometheus registry served at GET /metrics
+// (COMP-013, ADR-0008). The registry is created by the composition root and
+// passed in; the server never touches the global default registerer.
+func WithMetricsRegistry(reg *prometheus.Registry) Option {
+	return func(s *Server) {
+		if reg != nil {
+			s.metricsRegistry = reg
 		}
 	}
 }
@@ -127,11 +145,32 @@ func (s *Server) GetReadyz(ctx context.Context, _ api.GetReadyzRequestObject) (a
 	}, nil
 }
 
-// GetMetrics is the Prometheus exposition endpoint. Real metrics land in a
-// later card (COMP-013); for now it answers 200 with an empty body so the
-// generated contract is fully satisfied and the route is mountable.
+// GetMetrics is the Prometheus exposition endpoint (COMP-013, FR-010/NFR-007).
+// It serves the injected registry via promhttp.HandlerFor in Prometheus text
+// format. When no registry is injected it falls back to an empty 200 body so the
+// generated contract stays satisfied without metrics wiring.
 func (s *Server) GetMetrics(_ context.Context, _ api.GetMetricsRequestObject) (api.GetMetricsResponseObject, error) {
-	return api.GetMetrics200TextResponse(""), nil
+	if s.metricsRegistry == nil {
+		return api.GetMetrics200TextResponse(""), nil
+	}
+	return metricsResponse{reg: s.metricsRegistry}, nil
+}
+
+// metricsResponse adapts the promhttp exposition handler onto the generated
+// GetMetricsResponseObject seam, mirroring serviceUnavailableResponse: the
+// generated 200-text response cannot stream the Prometheus exposition, so this
+// thin wrapper delegates straight to promhttp.HandlerFor, which writes the
+// status, the Content-Type, and the text-format body itself.
+type metricsResponse struct {
+	reg *prometheus.Registry
+}
+
+// VisitGetMetricsResponse implements the generated response contract by serving
+// the registry through the standard promhttp handler.
+func (r metricsResponse) VisitGetMetricsResponse(w http.ResponseWriter) error {
+	h := promhttp.HandlerFor(r.reg, promhttp.HandlerOpts{})
+	h.ServeHTTP(w, &http.Request{Method: http.MethodGet, Header: make(http.Header)})
+	return nil
 }
 
 // CreateChatCompletion implements the non-streaming proxy (FR-001, COMP-002).
