@@ -83,4 +83,26 @@ The Provider interface supports both FR-001 paths (unary and streaming) and FR-0
 
 ## Worktree notes
 
-—
+### 2026-06-25 — implemented (golang-pro)
+
+COMP-005 Provider interface + Mock adapter landed under `internal/provider/`.
+
+**Files**
+- `internal/provider/provider.go` — package doc, `Provider` interface (exactly `Infer` + `InferStream`), canonical types `Request`, `Response`, `Chunk`, plus `Message`/`Role`/`Usage`. Includes the deferred "writing a real adapter" ACL contract note (ADR-0009); no real adapter implemented.
+- `internal/provider/mock.go` — configurable `Mock` (struct fields + functional options `New/WithResponse/WithLatency/WithError/WithStreamChunks`), `ErrMockFailure` sentinel, ctx-honouring `sleepCtx` helper, even `splitContent` chunker. No global state. Deterministic `ErrorRate` gate (>=1 fail, <=0 ok) so tests are reproducible under -race.
+- `internal/provider/mock_test.go` — unit tests + compile-time `var _ Provider = (*Mock)(nil)`.
+
+**Design notes**
+- `Infer` and `InferStream` both honour ctx (FR-003): `sleepCtx` selects on `ctx.Done()`; the stream producer goroutine selects on `ctx.Done()` at every send and always closes the channel via `defer close(out)` (no goroutine leak).
+- Canonical `Usage` (prompt/completion/total) lives on `Response` and on the terminal `Chunk` so CARD-010 metering reads canonical fields only.
+- `InferStream` reports a configured failure as a synchronous init error (nil channel); per-chunk transport failures would arrive as a terminal `Chunk.Err`.
+
+**Test coverage**
+- `TestMockProvider_Infer_ReturnsConfiguredResponse` — happy unary, usage populated.
+- `TestMockProvider_Infer_ErrorRate` — table-driven (default sentinel, custom err, rate>=1, rate<=0).
+- `TestMockProvider_Infer_ContextCancelled` — cancel mid-latency returns `context.Canceled` promptly (<1s of a 2s latency).
+- `TestMockProvider_InferStream_EmitsAndClosesChannel` — N content chunks reassemble Content, terminal Done chunk carries Usage, channel closes.
+- `TestMockProvider_InferStream_InitErrorOnFailure` — configured failure → init error, nil channel.
+- `TestMockProvider_InferStream_ContextCancelled_StopsAndCloses` — cancel mid-stream stops emission, channel closes within 1s (proves no goroutine leak).
+
+**Result:** `go vet ./...`, `go build ./...`, `golangci-lint run ./internal/provider/...`, and `go test -race ./...` all green.
