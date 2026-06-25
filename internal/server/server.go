@@ -19,6 +19,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/getkin/kin-openapi/routers/legacy"
@@ -28,6 +30,21 @@ import (
 	"github.com/adverax/sluice/internal/provider"
 	"github.com/adverax/sluice/internal/proxy"
 )
+
+// ErrServiceUnavailable is the sentinel the resilience layer (retry/breaker,
+// FR-007) wraps when it fast-fails: the per-provider circuit breaker is open
+// (AC-022) or the client deadline elapsed during a retry (AC-020). The handler
+// maps any error matching it (errors.Is) to HTTP 503. Defining it here, in the
+// package that owns the InferFunc seam, avoids an import cycle: the composition
+// root (internal/proxy/resilience) imports server, not the reverse.
+var ErrServiceUnavailable = errors.New("server: service unavailable")
+
+// retryAfterer is optionally satisfied by an InferFunc error to supply the
+// Retry-After hint surfaced on a 503 fast-fail. The resilience Unavailable error
+// implements it.
+type retryAfterer interface {
+	RetryAfter() time.Duration
+}
 
 // Server implements api.StrictServerInterface. It is the seam between the
 // generated HTTP boundary and the gateway core: it holds the model router
@@ -162,7 +179,18 @@ func (s *Server) CreateChatCompletion(ctx context.Context, request api.CreateCha
 
 	resp, err := s.infer(ctx, prov, req)
 	if err != nil {
-		// Provider failure (e.g. upstream 500, retries exhausted) → 502 (AC-003).
+		// Fast-fail (open breaker / deadline during retry) → 503 + Retry-After
+		// (AC-022, AC-020, INV-005). Checked before the generic 502 mapping so
+		// resilience signals are not masked as upstream provider errors.
+		if errors.Is(err, ErrServiceUnavailable) {
+			s.logger.LogAttrs(ctx, slog.LevelWarn, "request fast-failed (resilience)",
+				slog.String("model", body.Model),
+				slog.String("error", err.Error()),
+			)
+			return s.serviceUnavailable(err), nil
+		}
+		// Provider failure (e.g. upstream 5xx, retries exhausted) → 502 (AC-003,
+		// AC-019). A non-retryable 4xx StatusError also lands here (AC-021).
 		s.logger.LogAttrs(ctx, slog.LevelError, "provider inference failed",
 			slog.String("model", body.Model),
 			slog.String("error", err.Error()),
@@ -231,6 +259,49 @@ func badGateway(code, msg string) api.CreateChatCompletion502JSONResponse {
 	return api.CreateChatCompletion502JSONResponse{
 		BadGatewayJSONResponse: api.BadGatewayJSONResponse{Error: code, Message: msg},
 	}
+}
+
+// serviceUnavailable builds the 503 response for a resilience fast-fail. If the
+// error supplies a Retry-After hint (via the retryAfterer interface) it is
+// surfaced as the Retry-After header (AC-022). The default Retry-After applies
+// when no positive hint is present.
+func (s *Server) serviceUnavailable(err error) api.CreateChatCompletionResponseObject {
+	retryAfter := time.Duration(0)
+	var ra retryAfterer
+	if errors.As(err, &ra) {
+		retryAfter = ra.RetryAfter()
+	}
+	return serviceUnavailableResponse{
+		body: api.CreateChatCompletion503JSONResponse{
+			ServiceUnavailableJSONResponse: api.ServiceUnavailableJSONResponse{
+				Error:   "service_unavailable",
+				Message: "upstream temporarily unavailable; retry later",
+			},
+		},
+		retryAfter: retryAfter,
+	}
+}
+
+// serviceUnavailableResponse wraps the generated 503 response and adds a
+// Retry-After header (INV-005, AC-022). The generated response type does not
+// set that header, so the handler emits this thin wrapper instead.
+type serviceUnavailableResponse struct {
+	body       api.CreateChatCompletion503JSONResponse
+	retryAfter time.Duration
+}
+
+// VisitCreateChatCompletionResponse implements the generated response contract:
+// it sets Retry-After (seconds) when a positive hint is present, then delegates
+// the JSON body + 503 status to the generated response.
+func (r serviceUnavailableResponse) VisitCreateChatCompletionResponse(w http.ResponseWriter) error {
+	if r.retryAfter > 0 {
+		secs := int(r.retryAfter.Round(time.Second) / time.Second)
+		if secs < 1 {
+			secs = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+	}
+	return r.body.VisitCreateChatCompletionResponse(w)
 }
 
 // Handler builds the http.Handler for the gateway: it wraps this Server in the

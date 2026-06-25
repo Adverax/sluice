@@ -7,6 +7,7 @@ require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/oapi-codegen/oapi-codegen/v2 v2.7.1
 	github.com/redis/go-redis/v9 v9.21.0
+	github.com/sony/gobreaker v1.0.0
 )
 
 require (

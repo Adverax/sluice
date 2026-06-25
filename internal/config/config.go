@@ -39,6 +39,24 @@ const (
 
 	defaultLogLevel  = "info"
 	defaultLogFormat = "json"
+
+	// Retry engine (COMP-003, FR-006). MaxAttempts is the TOTAL number of tries
+	// (the first call plus retries), so the default of 3 means one initial call
+	// and up to two retries. BaseDelay/MaxDelay bound the exponential backoff and
+	// Jitter is the fraction (0..1) of the computed delay applied as random
+	// jitter to avoid thundering-herd retries.
+	defaultRetryMaxAttempts = 3
+	defaultRetryBaseDelay   = 50 * time.Millisecond
+	defaultRetryMaxDelay    = 2 * time.Second
+	defaultRetryJitter      = 0.5
+
+	// Circuit breaker (COMP-011, FR-007) tuned per ADR-0002 (volume_based_50pct).
+	defaultBreakerInterval     = 10 * time.Second // tumbling counter reset
+	defaultBreakerTimeout      = 60 * time.Second // open → half-open
+	defaultBreakerMaxRequests  = 5                // probes allowed in half-open
+	defaultBreakerMinRequests  = 10               // min volume before tripping
+	defaultBreakerFailureRatio = 0.5              // failure ratio that trips
+	defaultBreakerRetryAfter   = 60 * time.Second // Retry-After hint on 503
 )
 
 // Server holds the timeouts applied to the inbound *http.Server boundary
@@ -91,6 +109,40 @@ type Logging struct {
 	Format string
 }
 
+// Retry holds the tuning for the retry engine (COMP-003, FR-006). It is
+// consumed by internal/proxy/retry; the values are validated in Validate.
+type Retry struct {
+	// MaxAttempts is the TOTAL number of tries (initial call + retries). Must
+	// be >= 1; 1 disables retrying.
+	MaxAttempts int
+	// BaseDelay is the backoff for the first retry; subsequent retries grow
+	// exponentially up to MaxDelay.
+	BaseDelay time.Duration
+	// MaxDelay caps the exponential backoff.
+	MaxDelay time.Duration
+	// Jitter is the fraction (0..1) of the computed delay applied as random
+	// jitter to spread retries (avoids thundering herd).
+	Jitter float64
+}
+
+// Breaker holds the per-provider circuit-breaker tuning (COMP-011, FR-007)
+// per ADR-0002 (volume_based_50pct). It is consumed by internal/breaker.
+type Breaker struct {
+	// Interval is the tumbling counter-reset period in the closed state.
+	Interval time.Duration
+	// Timeout is the open→half-open recovery period.
+	Timeout time.Duration
+	// MaxRequests is the number of probe requests allowed in half-open.
+	MaxRequests uint32
+	// MinRequests is the minimum request volume before the breaker may trip.
+	MinRequests uint32
+	// FailureRatio is the failure ratio (0..1) at/above which the breaker trips.
+	FailureRatio float64
+	// RetryAfter is the hint surfaced to clients via the Retry-After header on a
+	// fast-fail 503 (open breaker / exhausted retries).
+	RetryAfter time.Duration
+}
+
 // Config is the fully-resolved service configuration.
 type Config struct {
 	Server   Server
@@ -98,6 +150,8 @@ type Config struct {
 	Redis    Redis
 	Postgres Postgres
 	Logging  Logging
+	Retry    Retry
+	Breaker  Breaker
 
 	// HealthCheckTimeout is the per-check deadline passed to each individual
 	// readiness checker. Keeping it separate from the Redis/Postgres timeouts
@@ -125,6 +179,31 @@ func Load() (*Config, error) {
 		return d
 	}
 
+	mustFloat := func(key string, fallback float64) float64 {
+		f, err := getFloat(key, fallback)
+		if err != nil {
+			errs = append(errs, err)
+			return fallback
+		}
+		return f
+	}
+
+	// mustPositiveInt reads an int and additionally rejects non-positive values
+	// (catches wrapping on uint32 cast and invalid counts). Used for fields where
+	// <= 0 is always invalid (attempts, requests).
+	mustPositiveInt := func(key string, fallback int) int {
+		n, err := getInt(key, fallback)
+		if err != nil {
+			errs = append(errs, err)
+			return fallback
+		}
+		if n <= 0 {
+			errs = append(errs, fmt.Errorf("env %s=%d: value must be > 0", key, n))
+			return fallback
+		}
+		return n
+	}
+
 	cfg := &Config{
 		Server: Server{
 			Addr:            getString("GATEWAY_ADDR", defaultAddr),
@@ -149,8 +228,22 @@ func Load() (*Config, error) {
 			Level:  getString("GATEWAY_LOG_LEVEL", defaultLogLevel),
 			Format: getString("GATEWAY_LOG_FORMAT", defaultLogFormat),
 		},
+		Retry: Retry{
+			MaxAttempts: mustPositiveInt("GATEWAY_RETRY_MAX_ATTEMPTS", defaultRetryMaxAttempts),
+			BaseDelay:   mustDuration("GATEWAY_RETRY_BASE_DELAY", defaultRetryBaseDelay),
+			MaxDelay:    mustDuration("GATEWAY_RETRY_MAX_DELAY", defaultRetryMaxDelay),
+			Jitter:      mustFloat("GATEWAY_RETRY_JITTER", defaultRetryJitter),
+		},
+		Breaker: Breaker{
+			Interval:     mustDuration("GATEWAY_BREAKER_INTERVAL", defaultBreakerInterval),
+			Timeout:      mustDuration("GATEWAY_BREAKER_TIMEOUT", defaultBreakerTimeout),
+			MaxRequests:  uint32(mustPositiveInt("GATEWAY_BREAKER_MAX_REQUESTS", defaultBreakerMaxRequests)),
+			MinRequests:  uint32(mustPositiveInt("GATEWAY_BREAKER_MIN_REQUESTS", defaultBreakerMinRequests)),
+			FailureRatio: mustFloat("GATEWAY_BREAKER_FAILURE_RATIO", defaultBreakerFailureRatio),
+			RetryAfter:   mustDuration("GATEWAY_BREAKER_RETRY_AFTER", defaultBreakerRetryAfter),
+		},
 		HealthCheckTimeout: mustDuration("GATEWAY_HEALTH_CHECK_TIMEOUT", defaultHealthCheckTimeout),
-		WorkerPoolSize:     getInt("GATEWAY_WORKER_POOL_SIZE", defaultWorkerPoolSize),
+		WorkerPoolSize:     mustPositiveInt("GATEWAY_WORKER_POOL_SIZE", defaultWorkerPoolSize),
 	}
 
 	if len(errs) > 0 {
@@ -183,11 +276,38 @@ func (c *Config) Validate() error {
 		{"redis.ReadTimeout", c.Redis.ReadTimeout},
 		{"postgres.AcquireTimeout", c.Postgres.AcquireTimeout},
 		{"healthCheckTimeout", c.HealthCheckTimeout},
+		// Retry/breaker timeouts are boundary timeouts too: keeping them in this
+		// list satisfies TestConfig_AllBoundariesHaveTimeouts' "any new timeout > 0"
+		// contract and the NFR-004 fail-loud guarantee.
+		{"retry.BaseDelay", c.Retry.BaseDelay},
+		{"retry.MaxDelay", c.Retry.MaxDelay},
+		{"breaker.Interval", c.Breaker.Interval},
+		{"breaker.Timeout", c.Breaker.Timeout},
+		{"breaker.RetryAfter", c.Breaker.RetryAfter},
 	}
 	for _, t := range timeouts {
 		if t.value <= 0 {
 			return fmt.Errorf("timeout %s must be > 0, got %s", t.name, t.value)
 		}
+	}
+
+	if c.Retry.MaxAttempts < 1 {
+		return fmt.Errorf("retry.MaxAttempts must be >= 1, got %d", c.Retry.MaxAttempts)
+	}
+	if c.Retry.MaxDelay < c.Retry.BaseDelay {
+		return fmt.Errorf("retry.MaxDelay (%s) must be >= retry.BaseDelay (%s)", c.Retry.MaxDelay, c.Retry.BaseDelay)
+	}
+	if c.Retry.Jitter < 0 || c.Retry.Jitter > 1 {
+		return fmt.Errorf("retry.Jitter must be in [0,1], got %g", c.Retry.Jitter)
+	}
+	if c.Breaker.FailureRatio <= 0 || c.Breaker.FailureRatio > 1 {
+		return fmt.Errorf("breaker.FailureRatio must be in (0,1], got %g", c.Breaker.FailureRatio)
+	}
+	if c.Breaker.MinRequests == 0 {
+		return fmt.Errorf("breaker.MinRequests must be > 0")
+	}
+	if c.Breaker.MaxRequests == 0 {
+		return fmt.Errorf("breaker.MaxRequests must be > 0")
 	}
 
 	if c.Server.ShutdownTimeout <= 0 {
@@ -230,14 +350,32 @@ func getDuration(key string, fallback time.Duration) (time.Duration, error) {
 	return d, nil
 }
 
-func getInt(key string, fallback int) int {
+// getInt returns (default, nil) when the env var is unset/empty.
+// It returns (default, error) when the var is set but unparseable,
+// so Load() can surface that as a hard failure (NFR-004 fail-loud).
+func getInt(key string, fallback int) (int, error) {
 	v, ok := os.LookupEnv(key)
 	if !ok || v == "" {
-		return fallback
+		return fallback, nil
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil {
-		return fallback
+		return fallback, fmt.Errorf("env %s=%q: %w", key, v, err)
 	}
-	return n
+	return n, nil
+}
+
+// getFloat returns (default, nil) when the env var is unset/empty.
+// It returns (default, error) when the var is set but unparseable,
+// so Load() can surface that as a hard failure (NFR-004 fail-loud).
+func getFloat(key string, fallback float64) (float64, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback, nil
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return fallback, fmt.Errorf("env %s=%q: %w", key, v, err)
+	}
+	return f, nil
 }

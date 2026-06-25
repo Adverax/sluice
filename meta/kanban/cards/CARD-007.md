@@ -95,4 +95,56 @@ Implement retry engine and circuit breaker under `internal/proxy/retry/**.go` an
 
 ## Worktree notes
 
-—
+Implemented in worktree `card/007-retries-circuit-breaker`.
+
+**Packages / files**
+- `internal/proxy/retry/retry.go` — Retry Engine (COMP-003). Bounded exponential
+  backoff + jitter, deadline-aware (`ctx.Err()` checked before every attempt and
+  during backoff), classification via typed/sentinel errors (no string-matching):
+  `*provider.StatusError` 5xx → retryable, 4xx → not; ctx errors → not; injectable
+  `WithNonRetryable` predicate marks `gobreaker.ErrOpenState` non-retryable. Sleep
+  and jitter RNG are injectable (`WithSleep`, `WithRand`) for deterministic tests.
+  Exhausted → wraps `ErrExhausted`.
+- `internal/breaker/breaker.go` — Circuit Breaker (COMP-011). Per-provider
+  `sony/gobreaker` registry keyed by model/provider name. ADR-0002 tuning
+  (Interval 10s, Timeout 60s, MaxRequests 5, ReadyToTrip Requests≥10 &&
+  ratio≥0.5), all configurable. `WithSettings` makes timing injectable so the
+  half-open test uses a 20ms Timeout instead of 60s. `WithOnStateChange` surfaces
+  EVT-004.
+- `internal/proxy/resilience/resilience.go` — composition root (ADR-0006):
+  `retry(breaker.Execute(providerCall))`, keyed by `req.Model`. Maps ErrOpenState
+  / deadline → `*Unavailable` (→ server 503 + Retry-After); exhausted/4xx → 502.
+- `internal/provider/provider.go` — added `StatusError{Code,Message}` typed error
+  with `Retryable()` (5xx) for adapter/Mock classification.
+- `internal/server/server.go` — added `ErrServiceUnavailable` sentinel +
+  Retry-After-bearing 503 response wrapper; `CreateChatCompletion` maps the
+  resilience signal to 503, everything else to 502. Seam unchanged (`InferFunc`).
+- `internal/config/config.go` — `Retry` + `Breaker` config (env
+  `GATEWAY_RETRY_*` / `GATEWAY_BREAKER_*`) with ADR defaults + validation.
+- `cmd/gateway/main.go` — wires `retry.New` + `breaker.NewRegistry` into
+  `resilience.New(...).InferFunc()` injected via `server.WithInferFunc`.
+
+**Composition into the InferFunc seam (ADR-0006):**
+`server.CreateChatCompletion` → `s.infer` (= composed InferFunc) →
+`retry.Do(breaker.Execute(provider.Infer))`. ErrOpenState is non-retryable
+(propagated immediately → 503). Seam left clean for CARD-008 (worker pool wraps
+the same `InferFunc` signature).
+
+**Deps:** `github.com/sony/gobreaker v1.0.0`.
+
+**AC → test mapping**
+- AC-018 `TestRetry_TransientError_SucceedsOnThirdAttempt` + integration
+  `TestComposition_TransientThenSuccess_200`
+- AC-019 `TestRetry_ExhaustedAttempts_Returns502` + `TestComposition_ExhaustedRetries_502`
+- AC-020 `TestRetry_ContextDeadlineExpired_NoRetry` (+`_DeadlineDuringBackoff_NoRetry`)
+  + `TestComposition_DeadlineExpired_503`
+- AC-021 `TestRetry_ClientError_NoRetry` + `TestComposition_ClientError_NoRetry_502`
+- AC-022 `TestCircuitBreaker_OpenState_FastFail` (no provider call, <1ms) +
+  `TestComposition_BreakerOpen_503_RetryAfter`
+- AC-023 `TestCircuitBreaker_ThresholdExceeded_Opens` (incl. min-volume guard +
+  EVT-004 hook)
+- AC-024 `TestCircuitBreaker_HalfOpen_SuccessClosesCircuit` (injected 20ms Timeout)
+
+**Verification:** `go build ./...`, `go vet ./...`, `go test -race ./...` all
+green; `go generate ./...` diff-clean (internal/api + api/openapi.yaml
+untouched); `go mod tidy` applied.
