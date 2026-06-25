@@ -15,7 +15,41 @@
 // they must satisfy.
 package provider
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
+
+// StatusError is the canonical, provider-agnostic error a Provider returns when
+// the upstream responds with a non-2xx HTTP status. It carries the status code
+// so the resilience layer (FR-006/FR-007) can classify the failure WITHOUT
+// string-matching: 5xx are transient/retryable, 4xx are client errors and must
+// not be retried (AC-021). Real adapters construct it from the upstream
+// response; the Mock can be configured to return it. Match it with errors.As.
+type StatusError struct {
+	// Code is the upstream HTTP status code (e.g. 400, 503).
+	Code int
+	// Message is a short, provider-agnostic description.
+	Message string
+}
+
+// Error implements error.
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("provider: upstream status %d: %s", e.Code, e.Message)
+}
+
+// Retryable reports whether this status represents a transient failure that is
+// safe to retry. Per FR-006/AC-021 only 5xx (server-side) statuses are
+// retryable; 4xx client errors are not. Codes outside the HTTP range default to
+// non-retryable.
+func (e *StatusError) Retryable() bool {
+	return e.Code >= 500 && e.Code <= 599
+}
+
+// NewStatusError builds a StatusError with the given code and message.
+func NewStatusError(code int, message string) *StatusError {
+	return &StatusError{Code: code, Message: message}
+}
 
 // Provider is the single port through which the gateway executes inference.
 // Per ADR-0009 it exposes exactly two methods — one per request path — and no

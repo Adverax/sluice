@@ -20,12 +20,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/sony/gobreaker"
+
+	"github.com/adverax/sluice/internal/breaker"
 	"github.com/adverax/sluice/internal/config"
 	"github.com/adverax/sluice/internal/health"
 	"github.com/adverax/sluice/internal/lifecycle"
 	"github.com/adverax/sluice/internal/logging"
 	"github.com/adverax/sluice/internal/provider"
 	"github.com/adverax/sluice/internal/proxy"
+	"github.com/adverax/sluice/internal/proxy/resilience"
+	"github.com/adverax/sluice/internal/proxy/retry"
 	"github.com/adverax/sluice/internal/server"
 )
 
@@ -91,9 +96,26 @@ func run() error {
 		health.NewPostgresChecker(pgPool),
 	)
 
+	// Resilience composition (FR-006/FR-007, ADR-0006): retry(breaker.Execute(
+	// providerCall)). The retry engine treats an open breaker as non-retryable so
+	// it never spins against ErrOpenState; the breaker is per-provider (keyed by
+	// model). The composed call is injected into the server's InferFunc seam
+	// (ADR-0006) so CARD-008's worker pool can wrap it later without changes.
+	retrier := retry.New(cfg.Retry, retry.WithNonRetryable(resilience.IsOpenState))
+	breakers := breaker.NewRegistry(cfg.Breaker,
+		breaker.WithOnStateChange(func(name string, from, to gobreaker.State) {
+			logger.Info("circuit breaker state change",
+				slog.String("provider", name),
+				slog.String("from", from.String()),
+				slog.String("to", to.String()),
+			)
+		}),
+	)
+	composer := resilience.New(retrier, breakers, cfg.Breaker.RetryAfter)
+
 	// HTTP boundary: implement the generated StrictServerInterface (ADR-0011)
 	// and register all routes on appMux via api.HandlerFromMux (CON-001).
-	srv := server.New(router, healthHandler, logger)
+	srv := server.New(router, healthHandler, logger, server.WithInferFunc(composer.InferFunc()))
 	appMux := http.NewServeMux()
 	appHandler := srv.Handler(appMux)
 
