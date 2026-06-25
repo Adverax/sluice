@@ -82,32 +82,56 @@ type Result struct {
 	Dependencies map[string]string
 }
 
-// Evaluate runs every registered checker under the Handler's per-check timeout
-// (derived from the supplied ctx) and returns the aggregated Result (FR-009).
-// It is the single source of truth for readiness; both Handler.Ready and the
-// api-generated /readyz handler build their response from it, so the verdict is
-// consistent across wiring choices.
+// checkResult is the outcome of a single Checker.Check call, carried through
+// a channel so Evaluate can collect results from concurrent goroutines.
+type checkResult struct {
+	name string
+	err  error
+}
+
+// Evaluate runs every registered checker CONCURRENTLY, each under an
+// individual per-check deadline derived from h.timeout (so a slow first check
+// cannot starve the rest). It returns the aggregated Result (FR-009).
+//
+// All goroutines are bound by ctx: they exit no later than when the
+// context-with-timeout derived here is cancelled, so there is no goroutine
+// leak even if a checker blocks.
 func (h *Handler) Evaluate(ctx context.Context) Result {
 	h.mu.RLock()
 	checkers := make([]Checker, len(h.checkers))
 	copy(checkers, h.checkers)
 	h.mu.RUnlock()
 
+	if len(checkers) == 0 {
+		return Result{Healthy: true, Dependencies: map[string]string{}}
+	}
+
+	// Per-check timeout: each goroutine gets its own bounded deadline so one
+	// slow checker cannot consume the entire budget at the expense of others.
 	ctx, cancel := context.WithTimeout(ctx, h.timeout)
 	defer cancel()
 
+	results := make(chan checkResult, len(checkers))
+	for _, c := range checkers {
+		c := c // capture for goroutine
+		go func() {
+			results <- checkResult{name: c.Name(), err: c.Check(ctx)}
+		}()
+	}
+
 	deps := make(map[string]string, len(checkers))
 	healthy := true
-	for _, c := range checkers {
-		if err := c.Check(ctx); err != nil {
+	for range checkers {
+		r := <-results
+		if r.err != nil {
 			healthy = false
-			deps[c.Name()] = err.Error()
+			deps[r.name] = r.err.Error()
 			h.logger.LogAttrs(ctx, slog.LevelWarn, "readiness check failed",
-				slog.String("dependency", c.Name()),
-				slog.String("error", err.Error()),
+				slog.String("dependency", r.name),
+				slog.String("error", r.err.Error()),
 			)
 		} else {
-			deps[c.Name()] = "ok"
+			deps[r.name] = "ok"
 		}
 	}
 

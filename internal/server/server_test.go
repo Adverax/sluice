@@ -203,6 +203,45 @@ func TestRouter_RoutesToCorrectProvider(t *testing.T) {
 	}
 }
 
+// TestProxy_InvalidRole_Returns400 covers ADR-0011 schema validation: a message
+// with an unknown role value (not in the spec enum) must be rejected 400 by the
+// OpenAPI request validator before reaching the provider. The spy MUST NOT be
+// called.
+func TestProxy_InvalidRole_Returns400(t *testing.T) {
+	spy := &spyProvider{}
+	router := proxy.NewRouter()
+	router.Register("gpt-4", spy)
+	h := newTestServer(t, router)
+
+	rec := doJSON(t, h, `{"model":"gpt-4","messages":[{"role":"banana","content":"x"}]}`)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if spy.called {
+		t.Error("provider.Infer must not be called when role is invalid")
+	}
+}
+
+// TestProxy_EmptyMessages_Returns400 covers ADR-0011 schema validation: the
+// messages field is required and must have at least one element. An empty
+// messages array must be rejected 400 before reaching the provider.
+func TestProxy_EmptyMessages_Returns400(t *testing.T) {
+	spy := &spyProvider{}
+	router := proxy.NewRouter()
+	router.Register("gpt-4", spy)
+	h := newTestServer(t, router)
+
+	rec := doJSON(t, h, `{"model":"gpt-4","messages":[]}`)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if spy.called {
+		t.Error("provider.Infer must not be called when messages is empty")
+	}
+}
+
 // --- Health & readiness (FR-008/FR-009) -----------------------------------
 
 func getReadyz(t *testing.T, h http.Handler) *httptest.ResponseRecorder {

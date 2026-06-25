@@ -15,9 +15,13 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+
+	"github.com/getkin/kin-openapi/openapi3filter"
+	"github.com/getkin/kin-openapi/routers/legacy"
 
 	"github.com/adverax/sluice/internal/api"
 	"github.com/adverax/sluice/internal/health"
@@ -134,6 +138,12 @@ func (s *Server) CreateChatCompletion(ctx context.Context, request api.CreateCha
 		return badRequest("missing_model", "the 'model' field is required"), nil
 	}
 
+	if len(body.Messages) == 0 {
+		// Empty messages: the provider has nothing to infer from; reject early
+		// rather than forwarding an empty conversation (defensive AC).
+		return badRequest("empty_messages", "the 'messages' field must contain at least one message"), nil
+	}
+
 	prov, err := s.router.Provider(body.Model)
 	if err != nil {
 		if errors.Is(err, proxy.ErrModelNotRegistered) {
@@ -228,8 +238,45 @@ func badGateway(code, msg string) api.CreateChatCompletion502JSONResponse {
 // /healthz, /readyz, /metrics) on mux via api.HandlerFromMux (CON-001). The
 // caller supplies the mux so application routes can be counted as in-flight
 // (FR-012) while probes are mounted uncounted at the top level (ADR-0006
-// composition order). Returns the populated mux as an http.Handler.
+// composition order). Returns the populated mux wrapped with an OpenAPI request
+// validator (ADR-0011) so invalid bodies (unknown enum values, missing required
+// fields) are rejected 400 BEFORE reaching CreateChatCompletion.
 func (s *Server) Handler(mux *http.ServeMux) http.Handler {
 	si := api.NewStrictHandler(s, nil)
-	return api.HandlerFromMux(si, mux)
+	inner := api.HandlerFromMux(si, mux)
+
+	// Build the kin-openapi request-validation middleware from the embedded spec.
+	// swagger.Servers is cleared to avoid host/scheme matching rejections in tests
+	// and in environments where the Host header doesn't match a declared server.
+	swagger, err := api.GetSwagger()
+	if err != nil {
+		// This is a programming error (bad embedded spec); panic early so it is
+		// caught by tests rather than silently skipping validation at runtime.
+		panic("server: failed to load embedded OpenAPI spec: " + err.Error())
+	}
+	swagger.Servers = nil
+
+	router, err := legacy.NewRouter(swagger)
+	if err != nil {
+		panic("server: failed to build OpenAPI router: " + err.Error())
+	}
+
+	validator := openapi3filter.NewValidator(
+		router,
+		openapi3filter.OnErr(func(ctx context.Context, w http.ResponseWriter, status int, code openapi3filter.ErrCode, err error) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(api.Error{
+				Error:   "validation_error",
+				Message: err.Error(),
+			})
+		}),
+		// Only validate requests; leave response validation off (not needed and
+		// adds per-request buffering overhead — strict mode can be enabled later).
+		openapi3filter.ValidationOptions(openapi3filter.Options{
+			ExcludeResponseBody: true,
+		}),
+	)
+
+	return validator.Middleware(inner)
 }

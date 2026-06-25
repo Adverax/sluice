@@ -29,6 +29,12 @@ const (
 
 	defaultPostgresAcquireTimeout = 5 * time.Second
 
+	// defaultHealthCheckTimeout is the per-check deadline passed to each
+	// individual readiness checker. It is set to the smaller of the two
+	// dependency timeouts so neither Redis nor Postgres can exceed their own
+	// configured dial timeout regardless of ordering.
+	defaultHealthCheckTimeout = 3 * time.Second
+
 	defaultWorkerPoolSize = 100
 
 	defaultLogLevel  = "info"
@@ -93,6 +99,12 @@ type Config struct {
 	Postgres Postgres
 	Logging  Logging
 
+	// HealthCheckTimeout is the per-check deadline passed to each individual
+	// readiness checker. Keeping it separate from the Redis/Postgres timeouts
+	// lets operators tune the probe SLA independently of the dependency
+	// connection timeouts (NFR-004).
+	HealthCheckTimeout time.Duration
+
 	// WorkerPoolSize is consumed by CARD-008; loaded here for completeness.
 	WorkerPoolSize int
 }
@@ -137,7 +149,8 @@ func Load() (*Config, error) {
 			Level:  getString("GATEWAY_LOG_LEVEL", defaultLogLevel),
 			Format: getString("GATEWAY_LOG_FORMAT", defaultLogFormat),
 		},
-		WorkerPoolSize: getInt("GATEWAY_WORKER_POOL_SIZE", defaultWorkerPoolSize),
+		HealthCheckTimeout: mustDuration("GATEWAY_HEALTH_CHECK_TIMEOUT", defaultHealthCheckTimeout),
+		WorkerPoolSize:     getInt("GATEWAY_WORKER_POOL_SIZE", defaultWorkerPoolSize),
 	}
 
 	if len(errs) > 0 {
@@ -157,7 +170,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("server addr must not be empty")
 	}
 
-	// The six timeouts called out by AC-045.
+	// The boundary timeouts called out by AC-045 (NFR-004).
 	timeouts := []struct {
 		name  string
 		value time.Duration
@@ -169,6 +182,7 @@ func (c *Config) Validate() error {
 		{"redis.DialTimeout", c.Redis.DialTimeout},
 		{"redis.ReadTimeout", c.Redis.ReadTimeout},
 		{"postgres.AcquireTimeout", c.Postgres.AcquireTimeout},
+		{"healthCheckTimeout", c.HealthCheckTimeout},
 	}
 	for _, t := range timeouts {
 		if t.value <= 0 {

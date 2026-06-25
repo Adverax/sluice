@@ -37,6 +37,7 @@ If a variable is set but malformed or `<= 0`, `Load` returns an error immediatel
 | `GATEWAY_DB_ACQUIRE_TIMEOUT` | `5s` | Postgres pool-acquire timeout |
 | `GATEWAY_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error` |
 | `GATEWAY_LOG_FORMAT` | `json` | `json` (production) or `text` (local dev) |
+| `GATEWAY_HEALTH_CHECK_TIMEOUT` | `3s` | Per-check deadline for `/readyz` dependency checks |
 | `GATEWAY_WORKER_POOL_SIZE` | `100` | Worker pool size (CARD-008) |
 
 Duration values use Go's `time.ParseDuration` syntax (e.g. `5s`, `1m30s`).

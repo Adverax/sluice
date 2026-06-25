@@ -69,7 +69,10 @@ func run() error {
 	})))
 
 	// Health/readiness framework (FR-008/FR-009) with REAL dependency checkers.
-	healthHandler := health.New(logger, cfg.Redis.DialTimeout)
+	// Use the dedicated per-check timeout (cfg.HealthCheckTimeout) rather than
+	// reusing cfg.Redis.DialTimeout so the readiness probe SLA is tunable
+	// independently of the Redis connection timeout (NFR-004).
+	healthHandler := health.New(logger, cfg.HealthCheckTimeout)
 
 	redisClient, err := newRedisClient(cfg.Redis)
 	if err != nil {
