@@ -72,3 +72,48 @@ _Single-card waves, retro'd together (first retro since Wave 1)._
 
 - Quality: 9.0 → 9.17 (stable, high)
 - Cycles: 3.0 → 1.33 (↑ fewer iterations — bootstrap was the cycle-heavy one)
+
+## Wave 5 — 2026-06-25
+
+_The 7-card fan-out (resilience + middleware + observability + metering), run sequentially._
+
+### Cards
+
+| Card | Title | Cat | Est | Actual | Cycles | Score | Signal |
+|------|-------|-----|-----|--------|--------|-------|--------|
+| CARD-007 | Retries & circuit breaker | feature | 2.5d | 0.1d | 2 | 9.0 | accurate (cycles) |
+| CARD-008 | Worker pool & backpressure | feature | 2d | 0.1d | 1 | 9.0 | simpler (cycles) |
+| CARD-005 | Rate limiting + ephemeral key | feature | 2.5d | 0.1d | 2 | 8.5 | accurate (cycles) |
+| CARD-009 | Observability (metrics/tracing/panic) | feature | 2.5d | 0.1d | 2 | 9.5 | accurate (cycles) |
+| CARD-004 | SSE streaming & cancellation | feature | 2d | 0.1d | 1 | 9.0 | simpler (cycles) |
+| CARD-006 | Response cache | feature | 1.5d | 0.1d | 3 | 9.0 | more complex (cycles) |
+| CARD-010 | Async metering → Postgres | feature | 2d | 0.1d | 2 | 9.5 | accurate (cycles) |
+
+### Metrics
+
+- cards: 7, escalated: 0, split: 0
+- total_estimate: 15d
+- avg_cycles: 1.86 (cycles proxy; accuracy invalid under AI wall-clock — same caveat as prior waves)
+- avg_final_score: 9.07, avg_initial_score: 8.43, score_improvement: +0.64
+- 5 of 7 cards required a fix cycle (the integration/middleware cards)
+
+### Calibration signals
+
+- golang-pro (7 cards, avg_cycles 1.86, proxy) → calibrated (no change; within 1.3–2.5 band)
+
+### Capacity vs plan
+
+- skipped — no explicit `capacity:` in meta/.skills.yml (all 7 cards `feature`)
+
+### Quality notes — the severity gate earned its keep
+
+The review caught genuine defects in 5 of 7 cards (not nits), all fixed before merge:
+- CARD-005: unbounded rate-limiter registry (DoS) + header-omission rate-limit bypass
+- CARD-006: oversize-body truncation corrupting the downstream handler (a cycle-2 Critical that was itself a regression from an over-scoped Minor fix — lesson: keep fix scope tight to gating findings)
+- CARD-009: unbounded metric/span cardinality from raw URL path
+- CARD-007: int/float config not fail-loud; CARD-010: forced-shutdown metering flush was a no-op (billing data loss)
+
+### Trend vs Waves 2–4
+
+- Quality: 9.17 → 9.07 (→ stable, high)
+- Cycles: 1.33 → 1.86 (↑ more iterations — expected: Wave 5 was the complex resilience/middleware integration)
