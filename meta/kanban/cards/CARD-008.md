@@ -82,4 +82,29 @@ NFR-006: goroutines waiting on upstream never exceed pool limit (AC-047).
 
 ## Worktree notes
 
-—
+Implemented COMP-010 in `internal/pool/`.
+
+**Files**
+- `internal/pool/pool.go` — `Pool` (buffered-channel semaphore), `New(size, retryAfter)`, `(*Pool).Guard(next server.InferFunc) server.InferFunc`, package-level `Guard(size, retryAfter, next)` convenience, and `ErrPoolSaturated` typed sentinel.
+- `internal/pool/pool_test.go` — unit tests (race-safe, channel-gated, no sleeps).
+- `internal/pool/bench_test.go` — small-scale NFR LOAD proxies for CARD-011.
+- `cmd/gateway/main.go` — wires `pool.Guard(cfg.WorkerPoolSize, cfg.Breaker.RetryAfter, composer.InferFunc())` into `server.WithInferFunc`.
+
+**Composition (ADR-0006), order:** pool acquire (reject-before-work) → retry → breaker → provider. The guard preserves the `server.InferFunc` signature, so CARD-005's rate-limit middleware sits OUTSIDE/above this layer unchanged.
+
+**Backpressure:** non-blocking acquire via `select { case sem<-{}: ; default: }`. When full, returns `&saturatedError` IMMEDIATELY — no goroutine started, no blocking (AC-038, INV-001). Slot released via `defer` on every return (success/error/panic) so freed slots accept new work instantly (AC-039). Concurrency can never exceed `cap(sem)` = `GATEWAY_WORKER_POOL_SIZE` (default 100, ADR-0003).
+
+**503 mapping:** `saturatedError` `Unwrap()`s to `ErrPoolSaturated` (direct `errors.Is`) and its `Is` matches `server.ErrServiceUnavailable`, plus it exposes `RetryAfter()`. The server's existing 503/Retry-After path (the same one used by the resilience `Unavailable`) maps it to HTTP 503 + `Retry-After` with NO new server code and NO string-matching.
+
+**AC → test mapping**
+- AC-038 → `TestWorkerPool_Saturated_Returns503WithRetryAfter` (N=10 held, 11th fast-fails → 503+Retry-After; asserts immediate return + no goroutine growth).
+- AC-039 → `TestWorkerPool_RecoveryAfterSaturation` (saturate, free 5, next 5 accepted).
+- NFR-006/AC-047 (unit) → `TestWorkerPool_NeverExceedsLimit` (64 callers vs limit 8: max observed concurrency == limit exactly, excess gets sentinel).
+- Extra: `TestPool_New_PanicsOnNonPositiveSize`, `TestPool_Guard_ReleasesOnError` (slot not leaked on error).
+- AC-043 → `BenchGateway_Overload3x_NocrashGracefulDegradation` (SMALL-SCALE proxy).
+- AC-044 → `BenchGateway_GoroutineLeakCheck` (SMALL-SCALE proxy, baseline ±5).
+- AC-047 → `BenchGateway_GoroutineCountBounded` (SMALL-SCALE proxy).
+
+The three `BenchGateway_*` functions are in-package PROXIES that assert the same invariants quickly (~thousands of iters). The FULL-scale soak (3×/500 RPS, 2 min, pprof baseline) is CARD-011's k6/load harness against the real gateway — noted in `bench_test.go`.
+
+**Status:** `go build ./...` OK; `go test -race ./...` all green; `go generate ./...` diff-clean (internal/api untouched); `go mod tidy` no change (pool uses only stdlib + internal pkgs — buffered-channel semaphore, no x/sync).
