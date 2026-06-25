@@ -9,6 +9,11 @@ import (
 // statusRecorder captures the response status code so the middleware can label
 // http_requests_total{status}. It mirrors the recorder in internal/logging but
 // is kept local so the two middlewares stay independent.
+//
+// Unwrap exposes the underlying ResponseWriter so http.ResponseController (and
+// net/http's capability detection) can reach the base writer — this preserves
+// Flusher AND Hijacker for streaming/SSE handlers without hand-forwarding each
+// interface individually.
 type statusRecorder struct {
 	http.ResponseWriter
 	status      int
@@ -37,11 +42,20 @@ func (r *statusRecorder) Flush() {
 	}
 }
 
+// Unwrap returns the underlying ResponseWriter so http.ResponseController and
+// net/http's interface-capability detection (Flusher, Hijacker, etc.) can reach
+// the base writer through this wrapper.
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
+}
+
 // Middleware records the HTTP-level metrics for every request: it increments and
 // decrements gateway_inflight_requests around the wrapped handler, times the
 // request into http_request_duration_seconds{route}, and counts the outcome in
-// http_requests_total{route,status}. The route label uses r.URL.Path; the
-// status label is the integer status code observed on the response.
+// http_requests_total{route,status}. The route label uses the matched ServeMux
+// pattern (r.Pattern, set by Go 1.22+ net/http AFTER routing). Unmatched paths
+// (404s) use the fixed label value "other" to prevent unbounded series
+// cardinality from arbitrary/attacker-controlled URL paths.
 //
 // It is intended to sit as an OUTER middleware (just inside logging/recovery) so
 // the inflight gauge and latency cover the whole request, including downstream
@@ -49,13 +63,20 @@ func (r *statusRecorder) Flush() {
 // if the handler panics (the recovery middleware translates that to a 500).
 func (m *Metrics) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		route := r.URL.Path
 		start := time.Now()
 
 		m.InflightRequests.Inc()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 
 		defer func() {
+			// Read r.Pattern AFTER next.ServeHTTP so the ServeMux has set it to
+			// the matched route template. An empty Pattern means no route matched
+			// (404); bucket all such requests under the fixed label "other" to
+			// prevent unbounded Prometheus series from raw URL paths.
+			route := r.Pattern
+			if route == "" {
+				route = "other"
+			}
 			m.InflightRequests.Dec()
 			m.HTTPRequestDuration.WithLabelValues(route).Observe(time.Since(start).Seconds())
 			m.HTTPRequestsTotal.WithLabelValues(route, strconv.Itoa(rec.status)).Inc()

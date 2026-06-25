@@ -101,6 +101,10 @@ func run() error {
 		Content:      "this is a mock completion",
 		FinishReason: "stop",
 	})))
+	// Seed breaker_state{provider} to closed (0) at registration so the series
+	// is always present in GET /metrics, even for a provider that has never
+	// tripped its breaker (AC-048: all six metrics must emit on startup).
+	met.SetBreakerState("mock", metrics.BreakerStateClosed)
 
 	// Health/readiness framework (FR-008/FR-009) with REAL dependency checkers.
 	// Use the dedicated per-check timeout (cfg.HealthCheckTimeout) rather than
