@@ -1,0 +1,41 @@
+@startuml
+' ============================================================================
+' Circuit breaker state machine (CAP-003).
+' Derived from real code + config defaults:
+'   internal/breaker/breaker.go        (Registry.defaultSettings / Execute)
+'   internal/config/config.go          (Breaker defaults; ADR-0002)
+' gobreaker drives the transitions; this is the configured behaviour.
+' ============================================================================
+title CAP-003 — Per-provider circuit breaker (sony/gobreaker, ADR-0002)
+
+[*] --> Closed
+
+state Closed {
+  Closed : calls pass through to provider
+  Closed : counts accumulate; tumbling reset every Interval (10s)
+  Closed : ReadyToTrip = Requests >= MinRequests(10)
+  Closed :              AND TotalFailures/Requests >= FailureRatio(0.5)
+}
+
+state Open {
+  Open : Execute returns ErrOpenState immediately (<1ms, INV-005)
+  Open : underlying provider call NOT invoked
+  Open : composition maps -> *Unavailable -> 503 + Retry-After
+}
+
+state HalfOpen {
+  HalfOpen : up to MaxRequests(5) probe calls allowed
+  HalfOpen : extra concurrent calls get ErrTooManyRequests
+}
+
+Closed --> Open : ReadyToTrip true\n(>=10 req AND >=50% fail)
+Open --> HalfOpen : after Timeout (60s)
+HalfOpen --> Closed : probe(s) succeed
+HalfOpen --> Open : a probe fails
+
+note right of Closed
+  client ctx errors (Canceled / DeadlineExceeded)
+  are NOT counted as failures
+  (breaker.go Execute: wrapped as success)
+end note
+@enduml

@@ -1,0 +1,76 @@
+@startuml
+' ============================================================================
+' Observability — instrumentation flow for one HTTP request (CTX-003, CAP-004).
+' Derived from the REAL middleware composition in cmd/gateway/main.go:311-318
+' and the per-middleware code in internal/{middleware,logging,metrics,tracing}.
+'
+' The chain is composed OUTERMOST-first:
+'   Recoverer( Logging( Tracing( metrics.Middleware( rateLimit( counting(
+'     cache( appHandler ) ) ) ) ) ) )
+' The provider-call instrumentation (metrics + tracing InstrumentInferFunc /
+' InstrumentStreamFunc) sits BELOW the handler, on the InferFunc/StreamFunc seam.
+' ============================================================================
+title Instrumentation flow — one request through the middleware chain
+
+skinparam shadowing false
+skinparam defaultTextAlignment center
+
+actor Client
+participant "Recoverer\ninternal/middleware/recover.go" as REC
+participant "Logging\ninternal/logging/middleware.go" as LOG
+participant "Tracing\ninternal/middleware/tracing.go" as TR
+participant "metrics.Middleware\ninternal/metrics/middleware.go" as MET
+participant "app handler\n(+ rate-limit, counting, cache)" as APP
+participant "instrumented InferFunc\ninternal/tracing + internal/metrics infer.go" as INF
+database "Prometheus Registry\n(injected, ADR-0008)" as REG
+queue "OTLP batch processor\ninternal/tracing/tracing.go" as EXP
+collections "slog.Logger\n(JSON, stdout)" as SLOG
+
+Client -> REC : HTTP request
+activate REC
+REC -> LOG : defer recover() guards the rest
+activate LOG
+LOG -> LOG : request_id = X-Request-ID or newRequestID()\nset on ctx + response header
+LOG -> TR : next
+activate TR
+TR -> TR : tracer.Start("HTTP <method>")\nroot span on ctx (SpanKindServer)
+TR -> MET : next (ctx carries root span)
+activate MET
+MET -> REG : gateway_inflight_requests.Inc()
+MET -> APP : next (start timer)
+activate APP
+APP -> INF : InferFunc(ctx, provider, req)
+activate INF
+INF -> INF : tracer.Start("provider.infer")\nchild span + start timer
+INF -> REG : provider_request_duration_seconds{provider}.Observe()
+INF -> EXP : child span enqueued (async)
+INF --> APP : response / error
+deactivate INF
+APP --> MET : response
+deactivate APP
+MET -> REG : inflight.Dec()\nhttp_request_duration_seconds{route}.Observe()\nhttp_requests_total{route,status}.Inc()
+MET --> TR : (route from r.Pattern; 404 -> "other")
+deactivate MET
+TR -> TR : span.SetName/SetAttributes(http.route, status_code)\nspan.End()
+TR -> EXP : root span enqueued (async)
+TR --> LOG :
+deactivate TR
+LOG -> SLOG : LogAttrs INFO "request completed"\n{request_id, latency_ms, status_code, method, path}
+LOG --> REC :
+deactivate LOG
+REC --> Client : response (or 500 if a panic was recovered)
+deactivate REC
+
+note over EXP
+  Batch (async) export to the OTel Collector
+  (otlptracehttp). A down collector NEVER blocks
+  the request — AC-050. Endpoint unset -> no-op
+  provider, gateway runs un-traced.
+end note
+
+note over REG
+  GET /metrics serves this registry via
+  promhttp.HandlerFor(reg, ...) — never the
+  global DefaultRegisterer (ADR-0008).
+end note
+@enduml

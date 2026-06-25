@@ -1,0 +1,34 @@
+@startuml
+' ============================================================================
+' sluice - Proxy (CTX-001) / CAP-005 Runtime lifecycle
+' Panic recovery state for a single request goroutine.
+' Derived from real code: internal/middleware/recover.go (Recoverer, SafeGo).
+' ============================================================================
+title "CAP-005: panic recovery on the request goroutine"
+
+[*] --> Serving : Recoverer (OUTERMOST) wraps next.ServeHTTP
+
+state Serving {
+  Serving --> Completed : handler returns normally
+}
+
+Serving --> Recovering : panic raised downstream
+
+state Recovering {
+  Recovering --> Reraised : rv == http.ErrAbortHandler
+  Recovering --> Logged   : any other panic value
+}
+
+Reraised --> [*] : panic(rv) — net/http handles abort\n(no 500 written, connection aborted)
+
+Logged --> Wrote500 : logging.LogPanic (ERROR + stack)\nthen WriteHeader(500) best-effort
+Wrote500 --> [*] : process SURVIVES; net/http keeps serving
+
+Completed --> [*]
+
+note right of Logged
+A panic in a DETACHED goroutine cannot be caught here
+(recover only works on the same stack). Such goroutines
+MUST be launched via SafeGo, which installs its own recover.
+end note
+@enduml

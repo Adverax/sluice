@@ -1,0 +1,51 @@
+@startuml
+' ============================================================================
+' sluice - Proxy (CTX-001) / CAP-001 Inference proxying
+' The SSE streaming sub-path of CreateChatCompletion.
+' Derived from real code:
+'   internal/server/server.go         (streamResponse.VisitCreateChatCompletionResponse,
+'                                       writeInitError, sseDone)
+'   internal/proxy/resilience/*        (StreamFunc seam: pool -> breaker, NO retry)
+'   internal/provider/httpprovider.go  (InferStream, streamLoop, sendChunk)
+' ============================================================================
+title "CAP-001: streaming (SSE) initiation-before-bytes + per-chunk flush"
+
+participant "streamResponse.Visit\n(internal/server/server.go)" as visit
+participant "StreamFunc seam\npool->breaker (NO retry)\n(resilience.Composer)" as seam
+participant "Provider.InferStream\n(internal/provider/httpprovider.go)" as provider
+participant "streamLoop goroutine" as loop
+participant "http.ResponseController" as rc
+actor "API Client" as client
+
+visit -> seam : stream(ctx, prov, req)  (BEFORE any byte)
+alt initiation fails
+  seam -> visit : err
+  visit -> visit : writeInitError
+  alt errors.Is ErrServiceUnavailable
+    visit -> client : 503 JSON + Retry-After (NOT a 200 stream)
+  else other (provider error)
+    visit -> client : 502 JSON provider_error
+  end
+else initiation succeeds
+  seam -> provider : p.InferStream(ctx, req)
+  provider -> loop : start goroutine, return <-chan Chunk
+  seam -> visit : <-chan Chunk
+  visit -> client : 200 text/event-stream, Cache-Control: no-cache
+  visit -> rc : Flush() headers
+  loop ->o visit : Chunk{Content}
+  loop -> loop : sendChunk select on ctx.Done()
+  visit -> client : data: {json}\n\n
+  visit -> rc : Flush() (per chunk)
+  loop ->o visit : Chunk{Done, Usage}
+  visit -> client : data: {usage}\n\n then "data: [DONE]\n\n"
+  visit -> rc : Flush()
+  visit -> visit : recordUsage(chunk.Usage) (non-blocking)
+end
+
+note over visit, loop
+Client disconnect: select on r.ctx.Done() returns;
+ctx (passed to StreamFunc) aborts upstream, streamLoop
+drains+closes channel, pool slot released exactly once.
+No retry on this path (partial stream cannot be replayed).
+end note
+@enduml

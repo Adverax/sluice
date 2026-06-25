@@ -1,0 +1,58 @@
+@startuml
+'==============================================================================
+' Sluice — Metering Context (CTX-004), CAP-006 Usage Metering
+' L4 mechanism diagram: the worker flush-decision loop and the graceful-shutdown
+' final drain. Derived from internal/metering/worker.go (run, flush, drain,
+' Close, FlushedOnShutdown) and cmd/gateway/main.go (lifecycle wiring).
+'==============================================================================
+title "Worker flush-decision loop + graceful-shutdown drain (POL-004 / POL-005 / AC-032)"
+
+skinparam shadowing false
+
+start
+:publishBufferSize() — gauge exists from start;
+repeat
+  partition "run() select" {
+    if (event from buffer?) then (yes)
+      :append to batch;
+      :publishBufferSize();
+      if (len(batch) >= batchSize?) then (yes)
+        :flush(batch);
+      else (no)
+      endif
+    elseif (ticker fired? (flushInterval)) then (yes)
+      :publishBufferSize();
+      :flush(batch)  // no-op if empty;
+    else (stop signal)
+      :flushed = flush(batch);
+      :flushed += drain()  // empty the channel, batch-flush remainder;
+      :atomic store shutdownFlushed = flushed;
+      :publishBufferSize();
+      stop
+    endif
+  }
+repeat while (loop) is (next select)
+
+note right
+  flush(batch): copy slice, then
+  for attempt 0..flushRetries:
+    ctx = WithTimeout(flushTimeout)
+    err = repo.Flush(ctx, events)
+    if err == nil -> return len(events)
+    log "metering flush failed"; sleep retryBackoff
+  log "metering batch dropped after retries" (AC-037)
+  return 0  // dropped-with-log, hot path unaffected
+end note
+
+note left
+  Shutdown wiring (cmd/gateway/main.go):
+  manager.OnShutdown(meteringWorker.Close)
+  registered AFTER the HTTP drain so no new
+  events arrive. Close(ctx) closes the stop
+  channel (buffer chan is NEVER closed),
+  waits on w.done OR its own hook deadline
+  (GATEWAY_SHUTDOWN_HOOK_TIMEOUT).
+  Lifecycle then logs "flushed M usage events"
+  via FlushedOnShutdown() (AC-015c).
+end note
+@enduml

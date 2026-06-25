@@ -1,0 +1,80 @@
+@startuml
+' ============================================================================
+' Rate-limit + backpressure decision flow (CAP-002).
+' Derived from real code:
+'   internal/middleware/ratelimit.go  (RateLimiter.Middleware / resolveKey / reject)
+'   internal/ratelimit/ratelimit.go   (Registry.Allow — local token bucket)
+'   internal/ratelimit/redisrepo.go   (RedisRepository.Allow — distributed Lua)
+'   internal/pool/pool.go             (Pool.tryAcquire / Guard)
+' ============================================================================
+title CAP-002 — Rate-limit + worker-pool decision flow (per request)
+
+start
+
+:resolveKey(r);
+note right
+  internal/middleware/ratelimit.go
+  1. Authorization header -> use as key
+  2. else sluice_api_key cookie (well-formed eph_+32hex) -> reuse
+  3. else mint crypto/rand ephemeral key (minted=true)
+end note
+
+if (key == "") then (crypto/rand failed)
+  :500 internal_error;
+  note right: fail-CLOSED (never share an anon bucket)
+  stop
+endif
+
+if (minted?) then (yes)
+  :Set X-Sluice-Api-Key header
+  + Set-Cookie sluice_api_key (HttpOnly);
+endif
+
+' ---- Tier 1: local token bucket ----
+:Registry.Allow(key) — local x/time/rate;
+note right
+  internal/ratelimit/ratelimit.go
+  ReserveN(now,1); delay>0 -> CancelAt + deny
+end note
+if (allowed?) then (no)
+  :IncRateLimitRejected();
+  :429 + Retry-After (tier=local);
+  stop
+endif
+
+' ---- Tier 2: distributed token bucket ----
+if (repo != nil?) then (yes)
+  :RedisRepository.Allow(ctx,key,rps,window);
+  note right
+    internal/ratelimit/redisrepo.go
+    atomic Lua token bucket {tokens,ts}
+  end note
+  if (Redis error?) then (yes)
+    :log Warn — FAIL OPEN to local;
+  else (no)
+    if (allowed?) then (no)
+      :IncRateLimitRejected();
+      :429 + Retry-After (tier=distributed);
+      stop
+    endif
+  endif
+endif
+
+:next.ServeHTTP — proceed to proxy/pool;
+
+' ---- Backpressure: worker pool (deeper in the seam) ----
+:Pool.Guard — tryAcquire();
+note right
+  internal/pool/pool.go
+  non-blocking select-send on buffered chan
+end note
+if (slot free?) then (no)
+  :return &saturatedError;
+  :503 + Retry-After (no goroutine spawned);
+  stop
+else (yes)
+  :hold slot, run retry->breaker->provider;
+  :defer release() (exactly once);
+endif
+stop
+@enduml

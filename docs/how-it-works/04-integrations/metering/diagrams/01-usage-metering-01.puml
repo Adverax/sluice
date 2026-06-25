@@ -1,0 +1,48 @@
+@startuml
+'==============================================================================
+' Sluice — Metering Context (CTX-004), CAP-006 Usage Metering
+' L4 mechanism diagram: the async metering flow with the drop-on-full branch.
+' Derived from internal/metering/{buffer,worker,pgxrepo,metering}.go and
+' internal/server/server.go (recordUsage). Reuses c4/components-metering.puml.
+'==============================================================================
+title "Async usage metering — one-way enqueue, bounded buffer, batch flush"
+
+skinparam shadowing false
+skinparam defaultTextAlignment center
+
+actor "Request\n(hot path)" as req
+participant "Server.recordUsage\n(internal/server)" as srv #lightyellow
+participant "Buffer.Enqueue\n(buffer.go, COMP-016)" as buf #lightblue
+queue "chan UsageEvent\ncap=1000 (ADR-0005)" as ch
+participant "Worker.run\n(worker.go, COMP-017)" as wkr #lightblue
+participant "PgxRepository.Flush\n(pgxrepo.go, COMP-018)" as repo #lightblue
+database "Postgres\nusage_events (EXT-003)" as pg
+participant "DropRecorder /\nBufferSizeRecorder\n(metrics, ADR-0008)" as met #lightgray
+
+== Hot path: one-way, non-blocking enqueue (INV-007 / INV-003) ==
+req -> srv : completed inference
+srv -> buf : Enqueue(UsageEvent)
+alt buffer has room
+    buf -> ch : ch <- e  (select case)
+    note right of ch: queued for the worker
+else buffer full (select default)
+    buf -> met : IncMeteringEventsDropped()\n(metering_events_dropped_total++)
+    note right of buf: DROPPED — never blocks (ADR-0007)
+end
+buf --> srv : returns immediately
+srv --> req : response sent (no wait on Postgres)
+
+== Background worker (separate goroutine) ==
+ch -> wkr : <-w.events (drain)
+wkr -> met : SetMeteringBufferSize(buf.Len())\n(metering_buffer_size gauge)
+note over wkr: accumulate into batch;\nflush on batchSize OR ticker (POL-004)
+wkr -> repo : Flush(ctx, events)
+repo -> pg : pgx.Batch INSERT usage_events\n(pipelined, one round-trip)
+pg --> repo : ok / error
+alt error
+    repo --> wkr : non-nil error
+    note over wkr: bounded retry then\ndrop-with-log (AC-037)
+else ok
+    repo --> wkr : nil
+end
+@enduml

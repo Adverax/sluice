@@ -1,0 +1,38 @@
+@startuml
+' ============================================================================
+' sluice - Proxy (CTX-001) / CAP-005 Runtime lifecycle
+' Graceful shutdown sequence.
+' Derived from real code:
+'   cmd/gateway/main.go            (signal.NotifyContext, manager.Run, OnShutdown wiring)
+'   internal/lifecycle/lifecycle.go (Run, shutdown, CountingMiddleware, hooks)
+'   internal/metering/worker.go    (Close, FlushedOnShutdown)
+' ============================================================================
+title "CAP-005: graceful shutdown on SIGINT/SIGTERM"
+
+participant "OS" as os
+participant "signal.NotifyContext\n(cmd/gateway/main.go)" as sig
+participant "Manager.Run / shutdown\n(internal/lifecycle/lifecycle.go)" as mgr
+participant "http.Server" as srv
+participant "OnShutdown hooks\n(own deadline ctx)" as hooks
+participant "Metering Worker\n(internal/metering/worker.go)" as worker
+
+os -> sig : SIGINT / SIGTERM
+sig -> mgr : ctx.Done()  (Run select)
+mgr -> mgr : draining = atomic load inFlight
+mgr -> mgr : log "shutdown signal received, draining"
+mgr -> srv : Shutdown(shutdownCtx)  (bounded by shutdownTimeout)
+alt drain completes in time
+  srv -> mgr : nil
+  mgr -> mgr : log "drained N requests"
+else drain deadline exceeded (forced)
+  srv -> mgr : context.DeadlineExceeded
+  mgr -> mgr : log "forced shutdown: N requests unfinished" (WARN)
+end
+loop each registered hook (registration order)
+  mgr -> hooks : hook(context.Background()+hookTimeout)
+  hooks -> worker : Close(ctx)  (flush remaining buffer)
+end
+mgr -> worker : flushedCountFn() -> FlushedOnShutdown()
+mgr -> mgr : log "shutdown complete: drained N requests, flushed M usage events"
+mgr -> sig : return (exit 0 on clean drain)
+@enduml

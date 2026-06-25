@@ -1,0 +1,45 @@
+@startuml
+' ============================================================================
+' Resilience composition seam (ADR-0006).
+' Derived from real code:
+'   cmd/gateway/main.go                (wiring + middleware chain)
+'   internal/proxy/resilience/resilience.go (InferFunc / StreamFunc)
+'   internal/pool/pool.go              (Guard / GuardStream)
+'   internal/breaker/breaker.go        (Execute / ExecuteStream)
+' ============================================================================
+title ADR-0006 — Resilience composition seam (outermost -> innermost)
+
+rectangle "HTTP middleware chain (cmd/gateway/main.go)" as MW {
+  card "recover -> logging -> tracing -> metrics\n-> **rate-limit (429 BEFORE work)**\n-> counting -> cache -> routes" as chain
+}
+
+rectangle "Unary provider seam (server.InferFunc)" as Unary {
+  card "pool.Guard (tryAcquire -> 503 on saturation)" as upool
+  card "retry.Engine.Do (skips open breaker as non-retryable)" as uretry
+  card "breaker.Execute (open -> ErrOpenState fast-fail)" as ubreaker
+  card "provider.Infer" as uprov
+  upool --> uretry
+  uretry --> ubreaker
+  ubreaker --> uprov
+}
+
+rectangle "Streaming seam (server.StreamFunc) — NO retry" as Stream {
+  card "pool.GuardStream (slot held for stream lifetime,\nreleased once via sync.Once)" as spool
+  card "breaker.ExecuteStream (initiation only)" as sbreaker
+  card "provider.InferStream" as sprov
+  spool --> sbreaker
+  sbreaker --> sprov
+}
+
+chain --> Unary : POST /v1/chat/completions (non-stream)
+chain --> Stream : POST /v1/chat/completions (stream=true)
+
+note bottom of Unary
+  ErrOpenState / deadline -> *Unavailable -> 503 + Retry-After
+  exhausted retries / 4xx StatusError -> 502
+end note
+note bottom of Stream
+  open breaker resolved BEFORE the 200/SSE header (AC-014a)
+  saturation -> 503 BEFORE any SSE byte (AC-014b)
+end note
+@enduml

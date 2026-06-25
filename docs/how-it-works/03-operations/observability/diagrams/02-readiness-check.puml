@@ -1,0 +1,58 @@
+@startuml
+' ============================================================================
+' Observability — readiness probe sequence (CTX-003, COMP-012, FR-009).
+' Derived from internal/health/health.go (Handler.Evaluate / Ready) and
+' internal/health/checkers.go (Redis + Postgres ping checkers), as served by
+' internal/server/server.go GetReadyz.
+' ============================================================================
+title Readiness check — GET /readyz
+
+skinparam shadowing false
+
+actor "Orchestrator\n(Kubernetes probe)" as K8S
+participant "Server.GetReadyz\ninternal/server/server.go" as SRV
+participant "health.Handler.Evaluate\ninternal/health/health.go" as EV
+participant "redis checker\ninternal/health/checkers.go" as RC
+participant "postgres checker\ninternal/health/checkers.go" as PC
+database "Redis (EXT-002)" as REDIS
+database "Postgres (EXT-003)" as PG
+
+K8S -> SRV : GET /readyz
+activate SRV
+SRV -> EV : Evaluate(ctx)
+activate EV
+EV -> EV : ctx, cancel = WithTimeout(ctx, h.timeout)\n(per-check deadline; default 2s)
+
+par concurrent checks
+  EV -> RC : Check(ctx)
+  activate RC
+  RC -> REDIS : Ping(ctx)
+  REDIS --> RC : ok / error
+  RC --> EV : nil / "redis ping: ..."
+  deactivate RC
+also
+  EV -> PC : Check(ctx)
+  activate PC
+  PC -> PG : Ping(ctx)
+  PG --> PC : ok / error
+  PC --> EV : nil / "postgres ping: ..."
+  deactivate PC
+end
+
+EV -> EV : aggregate -> Result{Healthy, Dependencies}
+EV --> SRV : Result
+deactivate EV
+
+alt all checkers nil
+  SRV --> K8S : 200 {"status":"ok",\n "dependencies":{"redis":"ok","postgres":"ok"}}
+else any checker errored
+  SRV --> K8S : 503 {"status":"unavailable",\n "dependencies":{"redis":"redis ping: ...", ...}}
+end
+deactivate SRV
+
+note right of K8S
+  GET /healthz is separate: liveness, ALWAYS 200
+  while the process is alive (no dependency checks).
+  Server.GetHealthz -> {"status":"ok"}.
+end note
+@enduml
