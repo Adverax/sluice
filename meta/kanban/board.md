@@ -5,13 +5,12 @@
 
 ---
 
-## Ready (4)
+## Ready (3)
 
 | CARD | Title | Status | Pri | Cat | Est | Depends | Skill |
 |------|-------|--------|-----|-----|-----|---------|-------|
 | CARD-004 | SSE streaming & context cancellation | ready | P1 | feature | 2d | CARD-003 ✓ | golang-pro |
 | CARD-006 | Response cache (Redis, TTL + per-request override) | ready | P2 | feature | 1.5d | CARD-003 | golang-pro |
-| CARD-009 | Observability: metrics, tracing, panic recovery | ready | P1 | feature | 2.5d | CARD-003 ✓ | golang-pro |
 | CARD-010 | Async usage metering → Postgres | ready | P2 | feature | 2d | CARD-003 ✓, CARD-001 ✓ | golang-pro |
 | CARD-011 | Load test, race-suite, CI & make up | ready | P2 | enabler | 2.5d | CARD-007, CARD-008, CARD-009, CARD-010 | golang-pro |
 
@@ -21,7 +20,7 @@
 
 | CARD | Title | Phase | Pri | Est | Branch |
 |------|-------|-------|-----|-----|--------|
-| CARD-009 | Observability: metrics, tracing, panic recovery | implementation | P1 | 2.5d | card/009-observability |
+| CARD-004 | SSE streaming & context cancellation | implementation | P1 | 2d | card/004-sse-streaming |
 
 ---
 
@@ -31,7 +30,7 @@ _none_
 
 ---
 
-## Done (7)
+## Done (8)
 
 | CARD | Title | Pri | Score | Actual | Merge |
 |------|-------|-----|-------|--------|-------|
@@ -42,6 +41,7 @@ _none_
 | CARD-007 | Retries & circuit breaker | P1 | 9.0 | 0.1d | e6a98db |
 | CARD-008 | Bounded worker pool & backpressure | P1 | 9.0 | 0.1d | 18ee178 |
 | CARD-005 | Per-key rate limiting (local→Redis) + ephemeral key | P1 | 8.5 | 0.1d | 2c406a2 |
+| CARD-009 | Observability: metrics, tracing, panic recovery | P1 | 9.5 | 0.1d | 90cb4b6 |
 
 ---
 

@@ -1,6 +1,6 @@
 # CARD-009: Observability — metrics, tracing, panic recovery
 
-**Status:** ready
+**Status:** done
 **Priority:** P1
 **Category:** feature
 **Estimate:** 2.5d
@@ -11,11 +11,11 @@
 **Worktree:** —
 **Source:** meta/architecture/handoff.md#increment-4
 **Depends on:** CARD-003
-**Review score:** —
-**Started:** —
-**Closed:** —
-**Actual:** —
-**Merge commit:** —
+**Review score:** 9.5 (2 cycles; cycle-1 important: metric/span cardinality, fixed; 6 ACs ✓)
+**Started:** 2026-06-25T10:29:02Z
+**Closed:** 2026-06-25T11:03:54Z
+**Actual:** 0.1d
+**Merge commit:** 90cb4b6
 **Blocked by:** —
 
 ## What to implement
