@@ -5,12 +5,11 @@
 
 ---
 
-## Ready (11)
+## Ready (10)
 
 | CARD | Title | Status | Pri | Cat | Est | Depends | Skill |
 |------|-------|--------|-----|-----|-----|---------|-------|
-| CARD-001 | Service bootstrap & lifecycle | ready | P1 | feature | 2d | — | golang-pro |
-| CARD-002 | Provider interface & mock | ready | P1 | feature | 1.5d | CARD-001 | golang-pro |
+| CARD-002 | Provider interface & mock | ready | P1 | feature | 1.5d | CARD-001 ✓ | golang-pro |
 | CARD-003 | Non-streaming proxy, router, health & timeouts | ready | P1 | feature | 2.5d | CARD-002 | golang-pro |
 | CARD-004 | SSE streaming & context cancellation | ready | P1 | feature | 2d | CARD-003 | golang-pro |
 | CARD-005 | Per-key rate limiting (local→Redis) + ephemeral key | ready | P1 | feature | 2.5d | CARD-003 | golang-pro |
@@ -35,9 +34,11 @@ _none_
 
 ---
 
-## Done (0)
+## Done (1)
 
-_none_
+| CARD | Title | Pri | Score | Actual | Merge |
+|------|-------|-----|-------|--------|-------|
+| CARD-001 | Service bootstrap & lifecycle | P1 | 9.0 | 0.1d | 9638bf7 |
 
 ---
 

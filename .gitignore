@@ -11,3 +11,6 @@
 # Local env
 .env
 .env.local
+
+# Kanban transient run state
+meta/kanban/dispatcher.state

@@ -1,6 +1,6 @@
 # CARD-001: Service bootstrap & lifecycle
 
-**Status:** ready
+**Status:** done
 **Priority:** P1
 **Category:** feature
 **Estimate:** 2d
@@ -11,11 +11,11 @@
 **Worktree:** —
 **Source:** meta/architecture/handoff.md#increment-1
 **Depends on:** —
-**Review score:** —
-**Started:** —
-**Closed:** —
-**Actual:** —
-**Merge commit:** —
+**Review score:** 9.0 (3 cycles; 0 critical/important; AC gate all ✓)
+**Started:** 2026-06-25T07:20:51Z
+**Closed:** 2026-06-25T07:45:57Z
+**Actual:** 0.1d
+**Merge commit:** 9638bf7
 **Blocked by:** —
 
 ## What to implement
