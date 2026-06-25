@@ -1,6 +1,6 @@
 # CARD-011: Load test, race-suite, CI & make up
 
-**Status:** ready
+**Status:** done
 **Priority:** P2
 **Category:** enabler
 **Estimate:** 2.5d
@@ -11,11 +11,11 @@
 **Worktree:** —
 **Source:** meta/architecture/handoff.md#increment-4
 **Depends on:** CARD-007, CARD-008, CARD-009, CARD-010
-**Review score:** —
-**Started:** —
-**Closed:** —
-**Actual:** —
-**Merge commit:** —
+**Review score:** 9.5 (2 cycles; cycle-1 important: make run/up :8080 conflict, fixed; ACs ✓, integration suite live-green)
+**Started:** 2026-06-25T12:32:46Z
+**Closed:** 2026-06-25T13:04:51Z
+**Actual:** 0.1d
+**Merge commit:** b0e400b
 **Blocked by:** —
 
 ## What to implement

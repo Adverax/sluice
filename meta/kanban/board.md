@@ -1,16 +1,13 @@
 # sluice — Kanban Board
 
-> 12 cards · ~24d total · 6 waves
+> 12 cards · ~24d total · 6 waves · **v1 FEATURE-COMPLETE (12/12 done)**
 > Gantt: [meta/kanban/gantt.md](gantt.md)
 
 ---
 
-## Ready (1)
+## Ready (0)
 
-| CARD | Title | Status | Pri | Cat | Est | Depends | Skill |
-|------|-------|--------|-----|-----|-----|---------|-------|
-| CARD-010 | Async usage metering → Postgres | ready | P2 | feature | 2d | CARD-003 ✓, CARD-001 ✓ | golang-pro |
-| CARD-011 | Load test, race-suite, CI & make up | ready | P2 | enabler | 2.5d | CARD-007, CARD-008, CARD-009, CARD-010 | golang-pro |
+_none_
 
 ---
 
@@ -26,7 +23,7 @@ _none_
 
 ---
 
-## Done (11)
+## Done (12)
 
 | CARD | Title | Pri | Score | Actual | Merge |
 |------|-------|-----|-------|--------|-------|
@@ -41,6 +38,7 @@ _none_
 | CARD-004 | SSE streaming & context cancellation | P1 | 9.0 | 0.1d | 9f09517 |
 | CARD-006 | Response cache (Redis, TTL + per-request override) | P2 | 9.0 | 0.1d | 2a25abf |
 | CARD-010 | Async usage metering → Postgres | P2 | 9.5 | 0.1d | 86f2f21 |
+| CARD-011 | Load test, race-suite, CI & make up | P2 | 9.5 | 0.1d | b0e400b |
 
 ---
 
@@ -50,16 +48,10 @@ _none_
 
 ---
 
-## Gantt
-
-See [meta/kanban/gantt.md](gantt.md) for the full Mermaid dependency chart with wave breakdown.
-
----
-
 ## Summary
 
-- **Total cards:** 12
-- **Total estimate:** ~24d
-- **Waves:** 6 (CARD-012 OpenAPI scaffolding inserted before CARD-003 per ADR-0011)
-- **P1 cards:** 9 · **P2 cards:** 3
+- **Total cards:** 12 · **all merged** · 0 escalated
+- **Avg review score:** 9.13 (range 8.5–9.5)
+- **Review cycles:** 5 of 12 cards needed a fix cycle (severity gate caught real defects)
 - **Features:** 10 · **Enablers:** 2 (CARD-011, CARD-012)
+- **main:** all packages green under `go test -race`; integration suite (testcontainers) live-green
