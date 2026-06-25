@@ -37,6 +37,18 @@ const (
 
 	defaultWorkerPoolSize = 100
 
+	// defaultCacheTTL is the response-cache entry lifetime (COMP-004, FR-005)
+	// per ADR-0004 (default 5 minutes; overridable per request via the
+	// X-Cache-TTL header). Configurable via GATEWAY_CACHE_TTL (fail-loud).
+	defaultCacheTTL = 5 * time.Minute
+
+	// defaultCacheMaxBodyBytes caps the request body buffered by the cache
+	// middleware for key computation (GATEWAY_CACHE_MAX_BODY_BYTES). Bodies
+	// larger than this limit fall through to the handler WITHOUT caching (not a
+	// 413 from the cache layer). 1 MiB is a conservative upper bound for a
+	// chat-completion JSON payload; raise it if larger requests need caching.
+	defaultCacheMaxBodyBytes = 1 << 20 // 1 MiB
+
 	defaultLogLevel  = "info"
 	defaultLogFormat = "json"
 
@@ -176,6 +188,22 @@ type RateLimit struct {
 	MaxKeys int
 }
 
+// Cache holds the response-cache tuning (COMP-004, FR-005) per ADR-0004. The
+// repository (Redis adapter) is wired in cmd/gateway; only the default TTL lives
+// here. The per-request X-Cache-TTL header override is handled in the cache
+// middleware, not config.
+type Cache struct {
+	// TTL is the default cache-entry lifetime applied when a request does not
+	// carry a valid X-Cache-TTL override. Must be > 0.
+	TTL time.Duration
+	// MaxBodyBytes is the per-request body-size cap for cache keying. Bodies
+	// exceeding this limit fall through to the handler WITHOUT caching (the
+	// cache layer never emits 413; the downstream handler/validator owns that
+	// decision). Configurable via GATEWAY_CACHE_MAX_BODY_BYTES (fail-loud).
+	// Default: 1 MiB.
+	MaxBodyBytes int64
+}
+
 // Config is the fully-resolved service configuration.
 type Config struct {
 	Server    Server
@@ -186,6 +214,7 @@ type Config struct {
 	Retry     Retry
 	Breaker   Breaker
 	RateLimit RateLimit
+	Cache     Cache
 
 	// HealthCheckTimeout is the per-check deadline passed to each individual
 	// readiness checker. Keeping it separate from the Redis/Postgres timeouts
@@ -227,6 +256,21 @@ func Load() (*Config, error) {
 	// <= 0 is always invalid (attempts, requests).
 	mustPositiveInt := func(key string, fallback int) int {
 		n, err := getInt(key, fallback)
+		if err != nil {
+			errs = append(errs, err)
+			return fallback
+		}
+		if n <= 0 {
+			errs = append(errs, fmt.Errorf("env %s=%d: value must be > 0", key, n))
+			return fallback
+		}
+		return n
+	}
+
+	// mustPositiveInt64 is like mustPositiveInt but for int64 fields (e.g.
+	// byte-count caps where an int may be too narrow on 32-bit platforms).
+	mustPositiveInt64 := func(key string, fallback int64) int64 {
+		n, err := getInt64(key, fallback)
 		if err != nil {
 			errs = append(errs, err)
 			return fallback
@@ -282,6 +326,10 @@ func Load() (*Config, error) {
 			Window:  mustDuration("GATEWAY_RATELIMIT_WINDOW", defaultRateLimitWindow),
 			MaxKeys: mustPositiveInt("GATEWAY_RATELIMIT_MAX_KEYS", defaultRateLimitMaxKeys),
 		},
+		Cache: Cache{
+			TTL:          mustDuration("GATEWAY_CACHE_TTL", defaultCacheTTL),
+			MaxBodyBytes: mustPositiveInt64("GATEWAY_CACHE_MAX_BODY_BYTES", defaultCacheMaxBodyBytes),
+		},
 		HealthCheckTimeout: mustDuration("GATEWAY_HEALTH_CHECK_TIMEOUT", defaultHealthCheckTimeout),
 		WorkerPoolSize:     mustPositiveInt("GATEWAY_WORKER_POOL_SIZE", defaultWorkerPoolSize),
 	}
@@ -325,6 +373,7 @@ func (c *Config) Validate() error {
 		{"breaker.Timeout", c.Breaker.Timeout},
 		{"breaker.RetryAfter", c.Breaker.RetryAfter},
 		{"rateLimit.Window", c.RateLimit.Window},
+		{"cache.TTL", c.Cache.TTL},
 	}
 	for _, t := range timeouts {
 		if t.value <= 0 {
@@ -429,4 +478,19 @@ func getFloat(key string, fallback float64) (float64, error) {
 		return fallback, fmt.Errorf("env %s=%q: %w", key, v, err)
 	}
 	return f, nil
+}
+
+// getInt64 returns (default, nil) when the env var is unset/empty.
+// It returns (default, error) when the var is set but unparseable,
+// so Load() can surface that as a hard failure (NFR-004 fail-loud).
+func getInt64(key string, fallback int64) (int64, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return fallback, fmt.Errorf("env %s=%q: %w", key, v, err)
+	}
+	return n, nil
 }

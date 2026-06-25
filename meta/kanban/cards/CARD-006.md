@@ -69,4 +69,35 @@ ADR-0004: default_5min_per_request_override — default TTL is 5 minutes; `X-Cac
 
 ## Worktree notes
 
-—
+Implemented on branch `card/006-response-cache`.
+
+**Files**
+- `internal/cache/cache.go` — `CacheRepository` port (ACL, ADR-0010): `Get(ctx,key) ([]byte,bool,error)` / `Set(ctx,key,value,ttl) error`.
+- `internal/cache/redisrepo.go` — go-redis/v9 adapter (`RedisRepository`) over the narrow `redis.Cmdable` surface; `redis.Nil` → clean miss, other errors surfaced; rejects non-positive TTL; `cache:` key prefix.
+- `internal/cache/redisrepo_test.go` — adapter unit tests against a fake `redis.Cmdable` (embeds the interface, overrides only Get/Set; live Redis deferred to CARD-011).
+- `internal/middleware/cache.go` — `CacheMiddleware` (depends only on the port).
+- `internal/middleware/cache_test.go` — middleware tests with an in-memory fake repo + spy handler.
+- `internal/config/config.go` — `Cache{TTL}`; `GATEWAY_CACHE_TTL` (default `5m`, fail-loud, validated `> 0`).
+- `cmd/gateway/main.go` — wires `cache.NewRedisRepository(redisClient)` + the middleware.
+
+**Chain position (innermost):** recover → logging → tracing → metrics → rate-limit → counting → **cache** → routes.
+
+**Behaviour**
+- Acts ONLY on `POST /v1/chat/completions`; everything else passes through untouched. Nil repo disables caching.
+- Reads + restores the request body (`io.NopCloser(bytes.NewReader(body))`) so the downstream strict handler can re-read it.
+- `stream:true` (tolerant minimal unmarshal) → full bypass: no key computed, no Get/Set (AC-016).
+- Key = `sha256(method \0 path \0 rawBody)` hex. DOCUMENTED limitation: raw-byte keying treats JSON whitespace/key-order differences as distinct entries (acceptable for v1; over-caching is never a correctness risk).
+- HIT → write cached 200 + body, `X-Cache: HIT`, `next` NOT called (provider not contacted) — AC-014.
+- MISS → capture status+body via an `Unwrap()`-bearing recorder, `X-Cache: MISS` (set before WriteHeader), store only on status 200 — AC-015. Store uses `context.WithoutCancel` + a 2s bound so a completed request's cancellation doesn't abort the best-effort write.
+- TTL: default from config; per-request `X-Cache-TTL` (positive integer seconds) overrides for that response only; invalid/non-positive ignored → default (ADR-0004).
+- Redis error on Get OR Set → logged at WARN + fall through to the live handler; never a client error (AC-017).
+
+**AC → test mapping**
+- AC-014 → `TestCache_Hit_ReturnsCachedResponse`
+- AC-015 → `TestCache_Miss_FetchesAndCaches` (asserts Set called with expected TTL)
+- AC-016 → `TestCache_StreamingNotCached` (asserts no Get/Set, handler called)
+- AC-017 → `TestCache_RedisDown_FallsThrough` (failGet+failSet → 200 from handler)
+- Per-request override → `TestCache_PerRequestTTLOverride` (table: 30→30s; abc/0/-5→default)
+- Extra: non-target route pass-through, non-200 not cached, body-restored-for-downstream; adapter: Set/Get round-trip, miss, Get/Set backend error, non-positive TTL, key prefix.
+
+**Verification:** `go build ./...` OK; `go test -race ./...` all green; `go generate ./...` diff-clean (api.gen.go / openapi.yaml untouched); `go mod tidy` no changes.

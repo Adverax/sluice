@@ -24,6 +24,7 @@ import (
 	"github.com/sony/gobreaker"
 
 	"github.com/adverax/sluice/internal/breaker"
+	"github.com/adverax/sluice/internal/cache"
 	"github.com/adverax/sluice/internal/config"
 	"github.com/adverax/sluice/internal/health"
 	"github.com/adverax/sluice/internal/lifecycle"
@@ -205,8 +206,20 @@ func run() error {
 		middleware.WithRejectRecorder(met),
 	)
 
+	// Response cache (COMP-004, FR-005, ADR-0004/ADR-0010). The repository is the
+	// go-redis adapter behind the CacheRepository port, reusing the same
+	// redisClient as the rate limiter and health checker. The middleware acts
+	// ONLY on POST /v1/chat/completions, bypasses streaming requests, and falls
+	// through to the live handler on any Redis error (a cache blip must never
+	// become a client error — AC-017). The default TTL comes from config
+	// (GATEWAY_CACHE_TTL, default 5m); X-Cache-TTL overrides it per request.
+	cacheRepo := cache.NewRedisRepository(redisClient)
+	cacheMW := middleware.NewCacheMiddleware(cacheRepo, cfg.Cache.TTL, logger,
+		middleware.WithMaxBodyBytes(cfg.Cache.MaxBodyBytes),
+	)
+
 	// Composition order (ADR-0006), outermost first:
-	//   recover → logging → tracing → metrics → rate-limit → counting → routes.
+	//   recover → logging → tracing → metrics → rate-limit → counting → cache → routes.
 	// Panic recovery is OUTERMOST so a handler panic is translated to a 500 and
 	// the process survives (AC-033); it wraps logging (which logs the panic at
 	// ERROR and re-panics — AC-041). Tracing creates the root span before the
@@ -215,12 +228,17 @@ func run() error {
 	// inflight gauge around the whole inner chain. Rate-limit still runs BEFORE
 	// any provider/pool work so a 429 never reaches the proxy (INV-004), and the
 	// counting middleware drains in-flight requests on shutdown (FR-012/NFR-005).
+	// The cache middleware is INNERMOST (just before the generated routes): a HIT
+	// short-circuits the provider path while still being covered by the outer
+	// logging/metrics/tracing instrumentation (FR-005).
 	handler := middleware.Recoverer(logger)(
 		logging.Middleware(logger)(
 			middleware.Tracing(tracer.Tracer())(
 				met.Middleware(
 					rateLimiter.Middleware(
-						manager.CountingMiddleware(appHandler),
+						manager.CountingMiddleware(
+							cacheMW.Middleware(appHandler),
+						),
 					),
 				),
 			),

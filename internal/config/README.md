@@ -51,5 +51,6 @@ If a variable is set but malformed or `<= 0`, `Load` returns an error immediatel
 | `GATEWAY_BREAKER_MIN_REQUESTS` | `10` | Minimum volume before tripping |
 | `GATEWAY_BREAKER_FAILURE_RATIO` | `0.5` | Failure ratio threshold (0–1] |
 | `GATEWAY_BREAKER_RETRY_AFTER` | `60s` | `Retry-After` hint surfaced on 503 fast-fail |
+| `GATEWAY_CACHE_TTL` | `5m` | Default response-cache entry TTL (ADR-0004); overridable per request via the `X-Cache-TTL` header (seconds) |
 
 Duration values use Go's `time.ParseDuration` syntax (e.g. `5s`, `1m30s`).
