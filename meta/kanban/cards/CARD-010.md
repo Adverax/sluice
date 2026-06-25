@@ -84,4 +84,61 @@ Implement async usage metering under `internal/metering/**.go` as COMP-016 Usage
 
 ## Worktree notes
 
-—
+Implemented on branch `card/010-async-metering`.
+
+**Packages / files**
+- `internal/metering/` (new): `metering.go` (UsageEvent, Sink/NopSink ports,
+  DropRecorder port, MeteringRepository port), `buffer.go` (COMP-016 Usage
+  Buffer), `worker.go` (COMP-017 Metering Worker), `pgxrepo.go` (COMP-018 pgx/v5
+  adapter over a narrow `Execer` interface). Tests: `buffer_test.go`,
+  `worker_test.go`, `pgxrepo_test.go`, `metering_test.go` (fakes).
+- `internal/metrics/metrics.go`: added `metering_events_dropped_total` counter +
+  `IncMeteringEventsDropped` on the Recorder port / NopRecorder.
+- `internal/config/config.go`: `Metering{BufferSize,FlushInterval}` from
+  `GATEWAY_METERING_BUFFER_SIZE` (default 1000, ADR-0005, fail-loud >0) and
+  `GATEWAY_METERING_FLUSH_INTERVAL` (default 5s).
+- `internal/server/server.go`: `WithMeteringSink` option; enqueue a UsageEvent
+  after a successful unary infer (status 200) and after stream completion
+  (terminal chunk usage, best-effort). Non-blocking.
+- `internal/lifecycle/lifecycle.go`: `OnShutdown` post-drain hooks; forced
+  shutdown (AC-051) logs `forced shutdown: N requests unfinished` on
+  `context.DeadlineExceeded` and returns nil; clean drain still logs
+  `drained N requests`.
+- `cmd/gateway/main.go`: builds Buffer+Worker+PgxRepository (reusing pgPool),
+  injects Sink into the server, registers `worker.Close` via `OnShutdown`
+  AFTER the HTTP drain (AC-032).
+- `migrations/0001_usage_events.sql` (new): `usage_events` DDL. CARD-011's
+  `make up` applies it; live pgx INSERT is integration-tested there
+  (testcontainers) — deferred here, repository unit-tested with a fake Execer.
+
+**Design / flush triggers**
+- Buffer: bounded channel; `Enqueue` is `select { case ch<-e: default: drop }`
+  (ADR-0007 drop-on-full) and increments the dropped counter via the injected
+  DropRecorder — the hot path NEVER blocks (INV-003 / CON-006).
+- Worker: single goroutine; flush triggers = batch size reached OR periodic
+  timer. All persistence + bounded retry runs in the worker goroutine.
+- Postgres-down (AC-037): bounded retry (default 2 extra attempts) with logged
+  failures, then drop-with-log — batch never silently lost; hot path unaffected.
+- Shutdown flush (AC-032): `Close(ctx)` signals stop, the worker flushes the
+  in-flight batch then drains all still-buffered events, then exits; `Close`
+  waits on a `done` channel (ctx-bounded; no goroutine leak, idempotent).
+
+**Ports & adapters**: metering imports neither prometheus nor a concrete pgx
+client (only `pgx.Batch`/`BatchResults` via a narrow `Execer`). Mirrors the
+ratelimit/breaker recorder injection (ADR-0008) and ADR-0010.
+
+**AC → test**
+- AC-035 → `TestMetering_AsyncFlush_PersistsRecords` (+ `_BatchSizeTrigger`)
+- AC-036 → `TestMetering_BufferFull_DropsWithoutBlocking`
+- AC-037 → `TestMetering_PostgresDown_NoHotpathBlock` (+ `_AlwaysFails_DropsWithLog`)
+- AC-032 → `TestGracefulShutdown_FlushesMetering` (+ lifecycle
+  `TestOnShutdown_HookRunsAfterDrain`)
+- AC-051 → `TestGracefulShutdown_TimeoutForced` (clean-drain tests stay green)
+- Server wiring → `TestProxy_UnaryEnqueuesUsage`,
+  `TestProxy_ProviderError_NoUsageEnqueued`
+- Repository → `TestPgxRepository_Flush_*` (fake Execer/BatchResults)
+
+**Status**: `go build ./...`, `go vet ./...`, `go test -race ./...` all green;
+`go generate ./...` diff-clean (api.gen.go untouched); `go mod tidy` no change
+(pgx/v5 already a dep). golangci-lint: only a PRE-EXISTING `SA1019`
+(`api.GetSwagger`) in untouched server code; new code clean.

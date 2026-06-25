@@ -30,6 +30,8 @@ import (
 
 	"github.com/adverax/sluice/internal/api"
 	"github.com/adverax/sluice/internal/health"
+	"github.com/adverax/sluice/internal/logging"
+	"github.com/adverax/sluice/internal/metering"
 	"github.com/adverax/sluice/internal/provider"
 	"github.com/adverax/sluice/internal/proxy"
 )
@@ -66,6 +68,13 @@ type Server struct {
 	// (COMP-013, ADR-0008). When nil, GetMetrics serves an empty body so the
 	// generated contract is still satisfied without metrics wiring.
 	metricsRegistry *prometheus.Registry
+
+	// meter is the async usage-metering sink (COMP-016, FR-014). After a
+	// completed inference the handler records a UsageEvent here with a
+	// NON-BLOCKING enqueue — the buffer drops on full so the hot path never
+	// blocks on metering (INV-003 / CON-006). Defaults to a no-op sink so the
+	// server runs without metering wiring.
+	meter metering.Sink
 }
 
 // InferFunc executes a single non-streaming inference against the chosen
@@ -98,6 +107,18 @@ func WithMetricsRegistry(reg *prometheus.Registry) Option {
 	}
 }
 
+// WithMeteringSink injects the async usage-metering sink (COMP-016, FR-014).
+// The handler records a UsageEvent after each completed inference via a
+// non-blocking Enqueue; on a full buffer the event is dropped so the hot path
+// never blocks (INV-003 / CON-006). When nil, a no-op sink is used.
+func WithMeteringSink(sink metering.Sink) Option {
+	return func(s *Server) {
+		if sink != nil {
+			s.meter = sink
+		}
+	}
+}
+
 // New constructs a Server. The router maps models to providers (FR-002) and the
 // health handler aggregates the readiness checkers (FR-009). The logger is
 // injected (ADR-0008). It is a compile-time error if Server stops satisfying
@@ -107,6 +128,7 @@ func New(router *proxy.Router, healthHandler *health.Handler, logger *slog.Logge
 		router: router,
 		health: healthHandler,
 		logger: logger,
+		meter:  metering.NopSink{},
 		infer: func(ctx context.Context, p provider.Provider, req provider.Request) (provider.Response, error) {
 			return p.Infer(ctx, req)
 		},
@@ -237,9 +259,12 @@ func (s *Server) CreateChatCompletion(ctx context.Context, request api.CreateCha
 			req:      req,
 			logger:   s.logger,
 			model:    body.Model,
+			meter:    s.meter,
+			start:    time.Now(),
 		}, nil
 	}
 
+	start := time.Now()
 	resp, err := s.infer(ctx, prov, req)
 	if err != nil {
 		// Fast-fail (open breaker / deadline during retry) → 503 + Retry-After
@@ -261,7 +286,37 @@ func (s *Server) CreateChatCompletion(ctx context.Context, request api.CreateCha
 		return badGateway("provider_error", "upstream provider request failed"), nil
 	}
 
+	// Async usage metering (FR-014): record the completed inference. Enqueue is
+	// non-blocking — on a full buffer the event is dropped (AC-036) so this never
+	// delays the response (INV-003 / CON-006). The routing key is the model alias
+	// (FR-002); the model is the resolved response model; tokens come from the
+	// canonical Usage (ADR-0009); status is 200 (success path).
+	s.recordUsage(ctx, body.Model, resp.Model, resp.Usage, time.Since(start), http.StatusOK)
+
 	return api.CreateChatCompletion200JSONResponse(toAPIResponse(resp)), nil
+}
+
+// recordUsage builds a UsageEvent from a completed inference and enqueues it on
+// the metering sink. The enqueue is non-blocking by contract (Sink.Enqueue), so
+// the request hot path is never blocked on metering (INV-003 / CON-006). routeKey
+// is the model alias used for routing (FR-002); model is the resolved model that
+// produced the completion; usage carries the canonical token accounting
+// (ADR-0009).
+func (s *Server) recordUsage(ctx context.Context, routeKey, model string, usage provider.Usage, latency time.Duration, status int) {
+	if model == "" {
+		model = routeKey
+	}
+	s.meter.Enqueue(metering.UsageEvent{
+		Provider:         routeKey,
+		Model:            model,
+		PromptTokens:     usage.PromptTokens,
+		CompletionTokens: usage.CompletionTokens,
+		TotalTokens:      usage.TotalTokens,
+		Latency:          latency,
+		Status:           status,
+		RequestID:        logging.RequestIDFromContext(ctx),
+		Timestamp:        time.Now(),
+	})
 }
 
 // toCanonicalRequest maps the generated request DTO onto the canonical
@@ -383,6 +438,11 @@ type streamResponse struct {
 	req      provider.Request
 	logger   *slog.Logger
 	model    string
+	// meter records a best-effort UsageEvent after the stream completes, using
+	// the terminal chunk's usage (FR-014). Enqueue is non-blocking (INV-003).
+	meter metering.Sink
+	// start is when the handler dispatched the stream, used for latency.
+	start time.Time
 }
 
 // sseDone is the conventional terminal marker of the chat-completions SSE
@@ -464,6 +524,10 @@ func (r streamResponse) VisitCreateChatCompletionResponse(w http.ResponseWriter)
 				}
 				_, _ = w.Write([]byte(sseDone))
 				_ = rc.Flush()
+				// Async usage metering for the streaming path (FR-014, best-effort):
+				// record the completed stream using the terminal chunk's usage. The
+				// enqueue is non-blocking so it never delays stream teardown (INV-003).
+				r.recordUsage(chunk.Usage)
 				return nil
 			}
 			// Content delta: forward as an SSE data event and flush so the client
@@ -483,6 +547,26 @@ func (r streamResponse) VisitCreateChatCompletionResponse(w http.ResponseWriter)
 			_ = rc.Flush()
 		}
 	}
+}
+
+// recordUsage enqueues a best-effort UsageEvent for the completed stream. The
+// sink defaults to a no-op so an un-metered server is safe; Enqueue is
+// non-blocking (drop-on-full) so stream teardown is never delayed (INV-003).
+func (r streamResponse) recordUsage(usage provider.Usage) {
+	if r.meter == nil {
+		return
+	}
+	r.meter.Enqueue(metering.UsageEvent{
+		Provider:         r.model,
+		Model:            r.model,
+		PromptTokens:     usage.PromptTokens,
+		CompletionTokens: usage.CompletionTokens,
+		TotalTokens:      usage.TotalTokens,
+		Latency:          time.Since(r.start),
+		Status:           http.StatusOK,
+		RequestID:        logging.RequestIDFromContext(r.ctx),
+		Timestamp:        time.Now(),
+	})
 }
 
 // streamChunk is the wire shape of one SSE data event on the streaming path. It

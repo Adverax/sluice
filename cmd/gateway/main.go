@@ -29,6 +29,7 @@ import (
 	"github.com/adverax/sluice/internal/health"
 	"github.com/adverax/sluice/internal/lifecycle"
 	"github.com/adverax/sluice/internal/logging"
+	"github.com/adverax/sluice/internal/metering"
 	"github.com/adverax/sluice/internal/metrics"
 	"github.com/adverax/sluice/internal/middleware"
 	"github.com/adverax/sluice/internal/pool"
@@ -167,12 +168,33 @@ func run() error {
 	// signature so the pool→retry→breaker→provider layering is untouched.
 	instrumentedInfer := tracer.InstrumentInferFunc(met.InstrumentInferFunc(guardedInfer))
 
+	// Async usage metering (COMP-016/COMP-017/COMP-018, FR-014,
+	// ADR-0005/ADR-0007/ADR-0010). The Usage Buffer is a bounded channel
+	// (GATEWAY_METERING_BUFFER_SIZE, default 1000) that decouples the request hot
+	// path from Postgres: the server enqueues a UsageEvent after each completed
+	// inference via a NON-BLOCKING send — drop-on-full so the hot path never
+	// blocks (INV-003 / CON-006). The dropped counter is incremented through the
+	// injected metrics recorder (metering never imports Prometheus, ADR-0008).
+	// The Metering Worker batch-reads from the buffer and flushes through the
+	// pgx/v5 MeteringRepository (reusing the same pgPool); its Close is registered
+	// as a lifecycle shutdown hook AFTER the HTTP drain so remaining buffered
+	// events are flushed before exit (AC-032).
+	meteringBuffer := metering.NewBuffer(cfg.Metering.BufferSize, met)
+	meteringRepo := metering.NewPgxRepository(pgPool)
+	meteringWorker := metering.NewWorker(meteringBuffer, meteringRepo, logger,
+		metering.WithFlushInterval(cfg.Metering.FlushInterval),
+	)
+	meteringWorker.Start()
+
 	// HTTP boundary: implement the generated StrictServerInterface (ADR-0011)
 	// and register all routes on appMux via api.HandlerFromMux (CON-001). The
-	// Prometheus registry is injected so GET /metrics serves it (COMP-013).
+	// Prometheus registry is injected so GET /metrics serves it (COMP-013). The
+	// metering sink is injected so completed inferences are recorded async
+	// (FR-014).
 	srv := server.New(router, healthHandler, logger,
 		server.WithInferFunc(instrumentedInfer),
 		server.WithMetricsRegistry(promRegistry),
+		server.WithMeteringSink(meteringBuffer),
 	)
 	appMux := http.NewServeMux()
 	appHandler := srv.Handler(appMux)
@@ -185,6 +207,11 @@ func run() error {
 	}
 
 	manager := lifecycle.New(httpServer, logger, cfg.Server.ShutdownTimeout)
+
+	// Flush remaining buffered usage events on shutdown, AFTER the HTTP drain so
+	// no new events are being enqueued by the time Close drains the buffer
+	// (AC-032 / FR-012). The hook shares the lifecycle shutdown deadline.
+	manager.OnShutdown(meteringWorker.Close)
 
 	// Rate-limit middleware (COMP-008/COMP-009, FR-004, ADR-0001/ADR-0006/ADR-0010).
 	// The LOCAL per-key token-bucket registry is the fast in-process path; the

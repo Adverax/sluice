@@ -10,12 +10,14 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/adverax/sluice/internal/api"
 	"github.com/adverax/sluice/internal/health"
+	"github.com/adverax/sluice/internal/metering"
 	"github.com/adverax/sluice/internal/provider"
 	"github.com/adverax/sluice/internal/proxy"
 	"github.com/adverax/sluice/internal/server"
@@ -97,6 +99,88 @@ func TestProxy_HappyPath_NonStreaming(t *testing.T) {
 	}
 	if got.Usage.TotalTokens != 5 {
 		t.Errorf("usage = %+v, want total 5", got.Usage)
+	}
+}
+
+// captureSink is a test metering.Sink that records every enqueued event. It is
+// goroutine-safe because the server may enqueue from the streaming Visit path.
+type captureSink struct {
+	mu     sync.Mutex
+	events []metering.UsageEvent
+}
+
+func (c *captureSink) Enqueue(e metering.UsageEvent) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.events = append(c.events, e)
+}
+
+func (c *captureSink) snapshot() []metering.UsageEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]metering.UsageEvent, len(c.events))
+	copy(out, c.events)
+	return out
+}
+
+// TestProxy_UnaryEnqueuesUsage asserts that after a successful non-streaming
+// inference the server records a UsageEvent on the metering sink (FR-014) with
+// the canonical usage and HTTP 200 status. This proves the metering wiring is in
+// the hot path without changing the 200 response.
+func TestProxy_UnaryEnqueuesUsage(t *testing.T) {
+	spy := &spyProvider{resp: provider.Response{
+		Model:        "gpt-4",
+		Content:      "hello world",
+		FinishReason: "stop",
+		Usage:        provider.Usage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5},
+	}}
+	router := proxy.NewRouter()
+	router.Register("gpt-4", spy)
+
+	sink := &captureSink{}
+	hh := health.New(discardLogger(), 0)
+	srv := server.New(router, hh, discardLogger(), server.WithMeteringSink(sink))
+	h := srv.Handler(http.NewServeMux())
+
+	rec := doJSON(t, h, `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	events := sink.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("enqueued %d usage events, want 1", len(events))
+	}
+	e := events[0]
+	if e.Provider != "gpt-4" {
+		t.Errorf("event provider = %q, want gpt-4", e.Provider)
+	}
+	if e.TotalTokens != 5 || e.PromptTokens != 3 || e.CompletionTokens != 2 {
+		t.Errorf("event usage = %+v, want 3/2/5", e)
+	}
+	if e.Status != http.StatusOK {
+		t.Errorf("event status = %d, want 200", e.Status)
+	}
+}
+
+// TestProxy_ProviderError_NoUsageEnqueued asserts a failed inference does NOT
+// record a usage event (only successful completions are metered).
+func TestProxy_ProviderError_NoUsageEnqueued(t *testing.T) {
+	spy := &spyProvider{err: errors.New("upstream boom")}
+	router := proxy.NewRouter()
+	router.Register("gpt-4", spy)
+
+	sink := &captureSink{}
+	hh := health.New(discardLogger(), 0)
+	srv := server.New(router, hh, discardLogger(), server.WithMeteringSink(sink))
+	h := srv.Handler(http.NewServeMux())
+
+	rec := doJSON(t, h, `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	if got := len(sink.snapshot()); got != 0 {
+		t.Errorf("enqueued %d usage events on failure, want 0", got)
 	}
 }
 
