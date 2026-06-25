@@ -5,11 +5,10 @@
 
 ---
 
-## Ready (2)
+## Ready (1)
 
 | CARD | Title | Status | Pri | Cat | Est | Depends | Skill |
 |------|-------|--------|-----|-----|-----|---------|-------|
-| CARD-006 | Response cache (Redis, TTL + per-request override) | ready | P2 | feature | 1.5d | CARD-003 | golang-pro |
 | CARD-010 | Async usage metering → Postgres | ready | P2 | feature | 2d | CARD-003 ✓, CARD-001 ✓ | golang-pro |
 | CARD-011 | Load test, race-suite, CI & make up | ready | P2 | enabler | 2.5d | CARD-007, CARD-008, CARD-009, CARD-010 | golang-pro |
 
@@ -19,7 +18,7 @@
 
 | CARD | Title | Phase | Pri | Est | Branch |
 |------|-------|-------|-----|-----|--------|
-| CARD-006 | Response cache (Redis, TTL + per-request override) | implementation | P2 | 1.5d | card/006-response-cache |
+| CARD-010 | Async usage metering → Postgres | implementation | P2 | 2d | card/010-async-metering |
 
 ---
 
@@ -29,7 +28,7 @@ _none_
 
 ---
 
-## Done (9)
+## Done (10)
 
 | CARD | Title | Pri | Score | Actual | Merge |
 |------|-------|-----|-------|--------|-------|
@@ -42,6 +41,7 @@ _none_
 | CARD-005 | Per-key rate limiting (local→Redis) + ephemeral key | P1 | 8.5 | 0.1d | 2c406a2 |
 | CARD-009 | Observability: metrics, tracing, panic recovery | P1 | 9.5 | 0.1d | 90cb4b6 |
 | CARD-004 | SSE streaming & context cancellation | P1 | 9.0 | 0.1d | 9f09517 |
+| CARD-006 | Response cache (Redis, TTL + per-request override) | P2 | 9.0 | 0.1d | 2a25abf |
 
 ---
 

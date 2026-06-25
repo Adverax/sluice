@@ -1,6 +1,6 @@
 # CARD-006: Response cache (Redis, TTL + per-request override)
 
-**Status:** ready
+**Status:** done
 **Priority:** P2
 **Category:** feature
 **Estimate:** 1.5d
@@ -11,11 +11,11 @@
 **Worktree:** —
 **Source:** meta/architecture/handoff.md#increment-2
 **Depends on:** CARD-003
-**Review score:** —
-**Started:** —
-**Closed:** —
-**Actual:** —
-**Merge commit:** —
+**Review score:** 9.0 (3 cycles; cycle-2 critical: oversize-body truncation, fixed; 4 ACs ✓)
+**Started:** 2026-06-25T11:23:48Z
+**Closed:** 2026-06-25T11:52:58Z
+**Actual:** 0.1d
+**Merge commit:** 2a25abf
 **Blocked by:** —
 
 ## What to implement
