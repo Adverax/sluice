@@ -5,14 +5,13 @@
 
 ---
 
-## Ready (7)
+## Ready (6)
 
 | CARD | Title | Status | Pri | Cat | Est | Depends | Skill |
 |------|-------|--------|-----|-----|-----|---------|-------|
 | CARD-004 | SSE streaming & context cancellation | ready | P1 | feature | 2d | CARD-003 ✓ | golang-pro |
 | CARD-005 | Per-key rate limiting (local→Redis) + ephemeral key | ready | P1 | feature | 2.5d | CARD-003 ✓ | golang-pro |
 | CARD-006 | Response cache (Redis, TTL + per-request override) | ready | P2 | feature | 1.5d | CARD-003 | golang-pro |
-| CARD-007 | Retries & circuit breaker | ready | P1 | feature | 2.5d | CARD-003 ✓ | golang-pro |
 | CARD-008 | Bounded worker pool & backpressure | ready | P1 | feature | 2d | CARD-003 | golang-pro |
 | CARD-009 | Observability: metrics, tracing, panic recovery | ready | P1 | feature | 2.5d | CARD-003 ✓ | golang-pro |
 | CARD-010 | Async usage metering → Postgres | ready | P2 | feature | 2d | CARD-003 ✓, CARD-001 ✓ | golang-pro |
@@ -32,7 +31,7 @@ _none_
 
 ---
 
-## Done (4)
+## Done (5)
 
 | CARD | Title | Pri | Score | Actual | Merge |
 |------|-------|-----|-------|--------|-------|
@@ -40,6 +39,7 @@ _none_
 | CARD-002 | Provider interface & mock | P1 | 9.0 | 0.1d | e2f2af9 |
 | CARD-012 | OpenAPI contract & codegen scaffolding | P1 | 9.5 | 0.1d | 4fa2d54 |
 | CARD-003 | Non-streaming proxy, router, health & timeouts | P1 | 9.0 | 0.1d | 9593466 |
+| CARD-007 | Retries & circuit breaker | P1 | 9.0 | 0.1d | e6a98db |
 
 ---
 

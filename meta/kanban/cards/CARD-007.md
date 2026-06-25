@@ -1,6 +1,6 @@
 # CARD-007: Retries & circuit breaker
 
-**Status:** ready
+**Status:** done
 **Priority:** P1
 **Category:** feature
 **Estimate:** 2.5d
@@ -11,11 +11,11 @@
 **Worktree:** —
 **Source:** meta/architecture/handoff.md#increment-3
 **Depends on:** CARD-003
-**Review score:** —
-**Started:** —
-**Closed:** —
-**Actual:** —
-**Merge commit:** —
+**Review score:** 9.0 (2 cycles; cycle-1 important: fail-loud config; 7 ACs ✓)
+**Started:** 2026-06-25T09:17:19Z
+**Closed:** 2026-06-25T09:45:03Z
+**Actual:** 0.1d
+**Merge commit:** e6a98db
 **Blocked by:** —
 
 ## What to implement
