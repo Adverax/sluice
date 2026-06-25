@@ -1,0 +1,80 @@
+@startuml
+!include <C4/C4_Component>
+' ============================================================================
+' Components: Resilience Context (CTX-002)
+' C4 Level 3 component diagram for the "sluice" LLM gateway (single Go service).
+'
+' Full COMP inventory lives in components-proxy.puml (the overview file).
+' This file draws ONLY the CTX-002 components:
+'   COMP-008 Rate Limit Middleware      (CAP-002)
+'   COMP-009 RateLimitRepository        (CAP-002)
+'   COMP-010 Worker Pool / Backpressure (CAP-002)
+'   COMP-011 Circuit Breaker            (CAP-003)
+'
+' Locked decisions reflected below:
+'   ADR-0006 composition order: rate-limit (429 BEFORE work) -> resolve provider
+'            -> retry( breaker.Execute(providerCall) ); open => no retry, fast-fail 503 + Retry-After.
+'            The Retry Engine wrapping the breaker lives in Proxy (COMP-003) -> referenced as external.
+'   ADR-0001 keyless request -> mint ephemeral API key + fresh token bucket, returned via X-Sluice-Api-Key.
+'   ADR-0002/0003 gobreaker (Interval 10s, ReadyToTrip >=10 req & >=50% fail, Timeout 60s, MaxRequests 3-5);
+'            worker pool size from GATEWAY_WORKER_POOL_SIZE (default 100) via errgroup SetLimit / semaphore.
+'   ADR-0010 RateLimitRepository is the ACL over go-redis/v9 to Redis (EXT-002); local x/time/rate + Redis.
+'   POL-003 worker pool saturation -> 503 + Retry-After (backpressure, bounded goroutines, NFR-006).
+'   INV-004 rate limit not exceeded; INV-005/INV-006 breaker open fast-fail <1ms; open->half-open after timeout;
+'            half-open->closed on success.
+' ============================================================================
+
+title Components: Resilience Context (CTX-002)
+
+' ---- External references (drawn elsewhere) ----
+System_Ext(llmProvider, "LLM Provider (mock)", "EXT-001 - v1 single mock provider")
+ContainerDb_Ext(redis, "Redis", "EXT-002 - distributed token buckets via go-redis/v9")
+
+Component_Ext(httpHandler, "HTTP Handler", "COMP-001 (Proxy) - request entry point")
+Component_Ext(retryEngine, "Retry Engine", "COMP-003 (Proxy) - retry( breaker.Execute(providerCall) )")
+Component_Ext(providerCall, "Provider Call Site", "COMP-005 (Proxy) - outbound provider invocation")
+
+' ---- Resilience Context boundary ----
+Container_Boundary(resilience, "Resilience Context") {
+
+    Component(rateLimit, "Rate Limit Middleware", "COMP-008 / CAP-002 - net/http middleware", "Returns 429 BEFORE any work (ADR-0006). Enforces per-key token bucket (INV-004). Keyless request: mints an ephemeral API key, creates a fresh per-key token bucket, returns it via X-Sluice-Api-Key header (ADR-0001).")
+
+    Component(rateLimitRepo, "RateLimitRepository", "COMP-009 / CAP-002 - ACL over go-redis/v9 (ADR-0010)", "Anti-corruption layer to Redis for distributed token buckets. Combines local x/time/rate with Redis-backed buckets.")
+
+    Component(workerPool, "Worker Pool / Backpressure", "COMP-010 / CAP-002 - bounded goroutines", "Pool size from env GATEWAY_WORKER_POOL_SIZE (default 100). Uses errgroup SetLimit / semaphore. Saturation -> 503 + Retry-After (POL-003, NFR-006).")
+
+    Component(circuitBreaker, "Circuit Breaker", "COMP-011 / CAP-003 - sony/gobreaker", "Tumbling Interval 10s; ReadyToTrip(>=10 requests AND >=50% failures); Timeout 60s; MaxRequests 3-5 (ADR-0002/0003). Open fast-fail <1ms (INV-005); open->half-open after Timeout; half-open->closed on success (INV-006).")
+}
+
+' ---- Relationships ----
+Rel(httpHandler, rateLimit, "incoming request: check+consume token; 429 if exceeded; mint ephemeral key if keyless", "in-process")
+note right of rateLimit
+  ADR-0001: keyless request returns
+  X-Sluice-Api-Key with a fresh
+  per-key token bucket.
+  ADR-0006: 429 returned BEFORE work.
+end note
+
+Rel(rateLimit, rateLimitRepo, "read/consume token bucket", "in-process")
+Rel(rateLimitRepo, redis, "distributed token buckets (local x/time/rate + Redis)", "go-redis/v9 / TCP")
+
+Rel(httpHandler, workerPool, "acquire slot or 503 + Retry-After", "in-process")
+note right of workerPool
+  POL-003: saturation -> 503 + Retry-After.
+  Bounded goroutines via errgroup SetLimit /
+  semaphore; size = GATEWAY_WORKER_POOL_SIZE
+  (default 100). NFR-006.
+end note
+
+Rel(retryEngine, circuitBreaker, "breaker.Execute(providerCall); ErrOpenState => no retry, fast-fail 503 + Retry-After", "in-process")
+note right of circuitBreaker
+  ADR-0006: breaker open ->
+  gobreaker.ErrOpenState -> NO retry
+  -> fast-fail 503 + Retry-After.
+  INV-005/INV-006 state machine.
+end note
+
+Rel(circuitBreaker, providerCall, "execute wrapped provider call", "in-process")
+Rel(providerCall, llmProvider, "invoke completion", "HTTPS")
+
+@enduml

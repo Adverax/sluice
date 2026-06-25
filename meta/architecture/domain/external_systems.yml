@@ -1,0 +1,49 @@
+# generated_by: forge:architect-domain-extraction
+# generated_at: 2026-06-24T00:00:00Z
+# tier: large
+
+external_systems:
+  - id: EXT-001
+    name: LlmProvider
+    direction: outbound
+    protocol: rest
+    description: >
+      An external LLM provider (OpenAI, Anthropic, or a managed mock) that executes
+      inference. In v1 it is implemented as a mock with configurable latency and
+      error rate behind the Provider interface. Extensibility is proven by the
+      interface.
+
+  - id: EXT-002
+    name: Redis
+    direction: bidirectional
+    protocol: other
+    description: >
+      A distributed store for ephemeral state (data plane): token buckets for the
+      per-API-key rate limiter, cache of identical requests (with TTL). Used via
+      the go-redis/v9 library. Checked in /readyz.
+
+  - id: EXT-003
+    name: Postgres
+    direction: outbound
+    protocol: other
+    description: >
+      A relational database (control plane): stores usage_events (async writes).
+      In v1 it is solely a metering ledger outside the hot path (batch inserts via
+      pgx/v5). Checked in /readyz. A real external dependency for readiness.
+
+  - id: EXT-004
+    name: Prometheus
+    direction: inbound
+    protocol: rest
+    description: >
+      The Prometheus scraper periodically polls GET /metrics. The gateway exports
+      metrics in Prometheus exposition format via prometheus/client_golang.
+
+  - id: EXT-005
+    name: OpenTelemetryCollector
+    direction: outbound
+    protocol: grpc
+    description: >
+      An OTel Collector (or compatible backend) that receives traces. The gateway
+      is instrumented via the OpenTelemetry SDK and exports end-to-end spans for
+      latency diagnostics.

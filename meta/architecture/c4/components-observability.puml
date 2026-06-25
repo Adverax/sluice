@@ -1,0 +1,89 @@
+@startuml
+' ============================================================================
+' Components: Observability Context (CTX-003)
+' sluice -- LLM gateway (single Go service), C4 Level 3 component diagram.
+'
+' Scope: this file draws ONLY the components of bounded context CTX-003.
+' For the full COMP inventory across all contexts, see the overview file:
+'   components-proxy.puml
+'
+' Locked decisions reflected here:
+'   ADR-0008 -- a SINGLE shared INJECTED *prometheus.Registry
+'               (promauto.With(reg)), NOT the global default; metrics are
+'               exposed via promhttp.HandlerFor(reg, ...). OTel tracing is
+'               implemented as middleware. slog.Logger is injected.
+'               Observability READS state of other contexts (Proxy,
+'               Resilience, Metering) through the shared in-process registry
+'               -- a conformist relationship.
+' ============================================================================
+!include <C4/C4_Component>
+
+title Components: Observability Context (CTX-003)
+
+Person(operator, "Operator / SRE", "Runs and monitors the gateway")
+System_Ext(orchestrator, "Container Orchestrator", "Kubernetes / runtime probing liveness & readiness")
+System_Ext(prometheus, "Prometheus / Grafana", "EXT-004 -- scrapes metrics, dashboards & alerts")
+System_Ext(otel, "OpenTelemetry Collector", "EXT-005 -- receives exported spans via gRPC")
+ContainerDb_Ext(redis, "Redis", "EXT-002 -- rate-limit & shared state store")
+ContainerDb_Ext(postgres, "Postgres", "EXT-003 -- persistence store")
+
+Container_Boundary(observability, "Observability Context") {
+
+    Component(comp012, "Health & Readiness Handlers", "Go / net/http -- CAP-004", "COMP-012. GET /healthz (liveness, returns 200 while alive). GET /readyz checks Redis + Postgres availability and returns 200 (ready) or 503 (not ready).")
+
+    Component(comp013, "Metrics Registry & Exporter", "Go / prometheus + promhttp -- CAP-004", "COMP-013. GET /metrics in Prometheus exposition format via promhttp.HandlerFor(reg). Owns the shared injected *prometheus.Registry (ADR-0008). Required metrics (NFR-007, 6/6): http_requests_total, http_request_duration_seconds, gateway_inflight_requests, provider_request_duration_seconds, ratelimit_rejected_total, breaker_state. Open host service to EXT-004.")
+
+    Component(comp014, "OTel Tracing Middleware", "Go / OpenTelemetry SDK -- CAP-004", "COMP-014. Produces end-to-end spans (incoming HTTP request + upstream provider call). Exports to the OTel Collector (EXT-005) over gRPC.")
+
+    Component(comp015, "Structured Logger", "Go / log/slog -- CAP-004", "COMP-015. Injected slog.Logger. Per-request log at INFO with request_id, latency_ms, status_code. Panics logged at ERROR with panic_value.")
+}
+
+' --- Observed contexts (referenced, not drawn in full). They register
+' --- metrics INTO the shared injected *prometheus.Registry (conformist).
+Container_Ext(proxy, "Proxy Context", "Go -- CTX-001", "In-flight & request outcomes")
+Container_Ext(resilience, "Resilience Context", "Go -- CTX-004", "breaker_state, ratelimit_rejected_total")
+Container_Ext(metering, "Metering Context", "Go -- CTX-002", "metering_events_dropped_total")
+
+' ---------------------------------------------------------------------------
+' Relationships
+' ---------------------------------------------------------------------------
+
+' Scrape / probe entry points
+Rel(operator, prometheus, "Views dashboards & alerts")
+Rel(prometheus, comp013, "Scrapes", "GET /metrics")
+Rel(orchestrator, comp012, "Probes liveness & readiness", "GET /healthz, /readyz")
+
+' Readiness dependency checks
+Rel(comp012, redis, "Readiness probe -- availability check")
+Rel(comp012, postgres, "Readiness probe -- availability check")
+
+' Tracing export
+Rel(comp014, otel, "Exports spans", "gRPC (collector-down tolerated)")
+
+' Shared injected registry + logger across all four components (ADR-0008)
+Rel(comp012, comp013, "Shares injected *prometheus.Registry / slog.Logger")
+Rel(comp014, comp013, "Shares injected *prometheus.Registry / slog.Logger")
+Rel(comp015, comp013, "Shares injected *prometheus.Registry / slog.Logger")
+
+' Other contexts register metrics into the shared registry read by COMP-013
+Rel(proxy, comp013, "Registers metrics into shared registry (conformist)", "in-process")
+Rel(resilience, comp013, "Registers metrics into shared registry (conformist)", "in-process")
+Rel(metering, comp013, "Registers metrics into shared registry (conformist)", "in-process")
+
+' ---------------------------------------------------------------------------
+' Notes
+' ---------------------------------------------------------------------------
+note right of comp014
+  FR-011 / AC-050: if the OTel Collector is
+  DOWN, span export must fail silently --
+  it must NOT break or block requests.
+end note
+
+note bottom of comp013
+  ADR-0008: metrics use a SINGLE shared INJECTED
+  *prometheus.Registry (promauto.With(reg)),
+  NOT the global default registry. Other contexts
+  observed via this in-process registry.
+end note
+
+@enduml

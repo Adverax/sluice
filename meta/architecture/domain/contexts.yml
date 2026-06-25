@@ -1,0 +1,180 @@
+# generated_by: forge:architect-context-mapping
+# generated_at: 2026-06-24T00:00:00Z
+# tier: large
+#
+# IMPORTANT (CON-003): sluice is a single Go service, not microservices.
+# Bounded contexts here are logical module boundaries within a single process,
+# NOT separate deployment units. They reflect differences in language, lifecycle,
+# and rate of change — not distribution.
+
+contexts:
+  - id: CTX-001
+    name: Proxy
+    description: >
+      The hot-path core: accepting an incoming HTTP request, routing to the provider
+      by the model field, cache lookup in Redis, proxying the response (JSON / SSE
+      stream), retries with backoff, cancelling the upstream call when the client
+      closes. Also manages the process lifecycle (graceful shutdown, panic recovery),
+      because both mechanisms operate directly on InferenceRequest state. Owns the
+      canonical definitions of the terms "request" and "provider".
+    capabilities: [CAP-001, CAP-005]
+    aggregates: [AGG-001]
+    ubiquitous_language: [TERM-002, TERM-003, TERM-009, TERM-011, TERM-012]
+
+  - id: CTX-002
+    name: Resilience
+    description: >
+      Protecting the hot path and upstream providers from overload and cascading
+      failures. Includes per-API-key rate limiting (token bucket, local +
+      Redis-distributed) and per-provider circuit breaking (sony/gobreaker). Both
+      mechanisms operate at the same level — deciding whether to let a request
+      through — and share the language of "limit", "state", and "fast fail". Manages
+      RateLimitState and CircuitBreakerState independently of the request lifecycle.
+    capabilities: [CAP-002, CAP-003]
+    aggregates: [AGG-002, AGG-003]
+    ubiquitous_language: [TERM-001, TERM-004, TERM-005, TERM-008, TERM-010, TERM-013]
+
+  - id: CTX-003
+    name: Observability
+    description: >
+      Instrumenting the service for the operator and orchestrator: liveness/readiness
+      probes (/healthz, /readyz), Prometheus metrics export (/metrics), end-to-end
+      OpenTelemetry traces, structured slog logs per request. This context does not
+      own business aggregates — it observes the state of other contexts via
+      published_language (events and metrics). Language: probe, trace, span, metric,
+      liveness, readiness.
+    capabilities: [CAP-004]
+    aggregates: []
+    ubiquitous_language: [TERM-012, TERM-014, TERM-015]
+    # validator-override: contexts.py
+    # reason: CTX-003 (Observability) does not own its own aggregates — the context
+    #   observes the state of others via published_language. For a single-service
+    #   with CON-003 this is the correct model: Observability is a cross-cutting
+    #   concern, not an independent subdomain with invariants.
+
+  - id: CTX-004
+    name: Metering
+    description: >
+      Asynchronous per-request recording of resource consumption to Postgres outside
+      the hot path. Accumulates UsageRecord entries in an in-memory buffer
+      (UsageBuffer) and flushes them in batches via a background worker. When the
+      buffer overflows, events are dropped without blocking the request. Fully
+      isolated from the hot path: the only coupling point is a one-way write to the
+      buffer (INV-003, INV-007). Language: usage record, metering buffer, batch
+      flush, dropped events.
+    capabilities: [CAP-006]
+    aggregates: [AGG-004]
+    ubiquitous_language: [TERM-006, TERM-007]
+
+context_map:
+  - from: CTX-001
+    to: CTX-002
+    relationship: customer_supplier
+    integration: sync_api
+    description: >
+      Proxy (downstream) calls Resilience (upstream) synchronously on the hot path:
+      it checks the rate limit and circuit breaker state before sending the request
+      to the provider. Resilience defines the contract (returns bool/error); Proxy
+      adapts to it.
+    decision: DEC-006
+
+  - from: CTX-001
+    to: CTX-004
+    relationship: customer_supplier
+    integration: events
+    description: >
+      Proxy publishes a usage event to the UsageBuffer (a one-way Go channel) after
+      request processing completes. Metering subscribes and persists asynchronously.
+      Proxy has no knowledge of Postgres — only of the buffer. Guarantee: the hot
+      path is never blocked (INV-003).
+    decision: DEC-007
+
+  - from: CTX-003
+    to: CTX-001
+    relationship: conformist
+    integration: sync_api
+    description: >
+      Observability reads the state of Proxy (in-flight count, request outcomes) via
+      a shared in-process metrics registry (prometheus/client_golang
+      counters/histograms). Conformist: Observability follows Proxy's model and does
+      not dictate to it. Integration is achieved through instrumentation (middleware,
+      instrumented transport).
+    decision: DEC-008
+
+  - from: CTX-003
+    to: CTX-002
+    relationship: conformist
+    integration: sync_api
+    description: >
+      Observability exports Resilience state metrics (breaker_state,
+      ratelimit_rejected_total) via the same in-process Prometheus registry.
+      Conformist: Observability adapts to Resilience's model.
+    decision: DEC-008
+
+  - from: CTX-003
+    to: CTX-004
+    relationship: conformist
+    integration: sync_api
+    description: >
+      Observability tracks the metering_events_dropped_total counter from Metering
+      via the shared Prometheus registry. Conformist.
+    decision: DEC-008
+
+  - from: CTX-001
+    to: EXT-001
+    relationship: anticorruption_layer
+    integration: sync_api
+    description: >
+      Proxy calls LlmProvider via a Go interface (Provider) that isolates the core
+      domain from the details of any specific LLM API. ACL: the Provider interface
+      abstracts the differences between providers (OpenAI, Anthropic, mock).
+      Extensibility via interface.
+    decision: DEC-009
+
+  - from: CTX-002
+    to: EXT-002
+    relationship: anticorruption_layer
+    integration: sync_api
+    description: >
+      Resilience uses Redis for distributed rate limiting (token buckets per API key)
+      via go-redis/v9. ACL: Redis-specific logic is encapsulated in the repository
+      layer; the Resilience domain does not depend on Redis commands directly.
+    decision: DEC-010
+
+  - from: CTX-001
+    to: EXT-002
+    relationship: anticorruption_layer
+    integration: sync_api
+    description: >
+      Proxy uses Redis for response caching (lookup/store by request key) via
+      go-redis/v9. ACL: the cache adapter hides the Redis API from the Proxy domain.
+    decision: DEC-010
+
+  - from: CTX-004
+    to: EXT-003
+    relationship: anticorruption_layer
+    integration: sync_api
+    description: >
+      Metering persists UsageRecord entries in batches to Postgres via pgx/v5. ACL:
+      the metering repository encapsulates SQL details; the UsageRecord domain model
+      does not depend on pgx types.
+    decision: DEC-010
+
+  - from: CTX-003
+    to: EXT-004
+    relationship: open_host_service
+    integration: sync_api
+    description: >
+      Observability publishes metrics in the standard Prometheus exposition format
+      via GET /metrics. Open host service: a single well-defined protocol serves
+      any compatible scraper.
+    decision: DEC-008
+
+  - from: CTX-003
+    to: EXT-005
+    relationship: conformist
+    integration: sync_api
+    description: >
+      Observability exports OTel traces to the OpenTelemetry Collector via gRPC.
+      Conformist: Observability follows the OTel protocol without adaptation.
+    decision: DEC-008

@@ -1,0 +1,407 @@
+# generated_by: forge:architect-synthesis
+# generated_at: 2026-06-25T00:00:00Z
+# tier: large
+# Regenerate with: /architect-synthesis --trace-only
+#
+# Trace matrix: requirements (FR/NFR/CON) -> capabilities -> contexts -> components -> ADRs -> tests.
+# Test names are the planned test identifiers already declared in requirements.yml acceptance criteria.
+# status: covered (>=1 component AND >=1 test) | partial (component, no test) | missing (no component).
+# Greenfield: components map to planned code globs (internal/<area>/**.go per spec section 4); no _meta.as_built.
+
+links:
+  - req: FR-001
+    description: "Proxy POST /v1/chat/completions to provider; return JSON or SSE stream."
+    capabilities: [CAP-001]
+    contexts: [CTX-001]
+    components: [COMP-001, COMP-002, COMP-005]
+    adrs: [ADR-0006, ADR-0009]
+    tests:
+      - TestProxy_HappyPath_NonStreaming
+      - TestProxy_HappyPath_Streaming
+      - TestProxy_ProviderError_Returns502
+      - TestProxy_InvalidBody_Returns400
+    status: partial
+
+  - req: FR-002
+    description: "Route request to the correct provider by the model field."
+    capabilities: [CAP-001]
+    contexts: [CTX-001]
+    components: [COMP-001, COMP-002]
+    adrs: [ADR-0006, ADR-0009]
+    tests:
+      - TestRouter_RoutesToCorrectProvider
+      - TestRouter_MissingModel_Returns400
+      - TestRouter_UnknownModel_Returns404
+    status: partial
+
+  - req: FR-003
+    description: "Cancel upstream call via context cancellation when client disconnects (INV-002, POL-006)."
+    capabilities: [CAP-001]
+    contexts: [CTX-001]
+    components: [COMP-002, COMP-005]
+    adrs: [ADR-0009]
+    tests:
+      - TestProxy_ClientCancel_AbortsUpstream
+      - TestProxy_StreamingClientCancel_AbortsUpstream
+      - TestProxy_ClientCancel_DoesNotAffectOtherInflight
+    status: partial
+
+  - req: FR-004
+    description: "Per-API-key rate limiting (token bucket, local + Redis); 429 + Retry-After when exceeded (INV-004)."
+    capabilities: [CAP-002]
+    contexts: [CTX-002]
+    components: [COMP-008, COMP-009]
+    adrs: [ADR-0006, ADR-0001, ADR-0010]
+    tests:
+      - TestRateLimit_ExceedLimit_Returns429WithRetryAfter
+      - TestRateLimit_WithinLimit_Passes
+      - TestRateLimit_MissingApiKey_HandledGracefully
+      - TestRateLimit_DistributedRedis_GlobalLimit
+    status: partial
+
+  - req: FR-005
+    description: "Cache identical responses in Redis with TTL; serve cache hits without contacting provider."
+    capabilities: [CAP-001]
+    contexts: [CTX-001]
+    components: [COMP-002, COMP-004]
+    adrs: [ADR-0004, ADR-0010]
+    tests:
+      - TestCache_Hit_ReturnsCachedResponse
+      - TestCache_Miss_FetchesAndCaches
+      - TestCache_StreamingNotCached
+      - TestCache_RedisDown_FallsThrough
+    status: partial
+
+  - req: FR-006
+    description: "Retry idempotent upstream errors with exponential backoff + jitter, bounded, deadline-aware (POL-001)."
+    capabilities: [CAP-001]
+    contexts: [CTX-001]
+    components: [COMP-002, COMP-003]
+    adrs: [ADR-0006]
+    tests:
+      - TestRetry_TransientError_SucceedsOnThirdAttempt
+      - TestRetry_ExhaustedAttempts_Returns502
+      - TestRetry_ContextDeadlineExpired_NoRetry
+      - TestRetry_ClientError_NoRetry
+    status: partial
+
+  - req: FR-007
+    description: "Circuit breaker (sony/gobreaker) per provider; open -> fast-fail (INV-005, INV-006, POL-002)."
+    capabilities: [CAP-003]
+    contexts: [CTX-002]
+    components: [COMP-011]
+    adrs: [ADR-0002, ADR-0006]
+    tests:
+      - TestCircuitBreaker_OpenState_FastFail
+      - TestCircuitBreaker_ThresholdExceeded_Opens
+      - TestCircuitBreaker_HalfOpen_SuccessClosesCircuit
+    status: partial
+
+  - req: FR-008
+    description: "GET /healthz returns 200 while the process is alive."
+    capabilities: [CAP-004]
+    contexts: [CTX-003]
+    components: [COMP-012]
+    adrs: [ADR-0008]
+    tests:
+      - TestHealthz_ReturnsOK
+    status: partial
+
+  - req: FR-009
+    description: "GET /readyz returns 200 when Redis+Postgres are up, 503 when a dependency is down."
+    capabilities: [CAP-004]
+    contexts: [CTX-003]
+    components: [COMP-012]
+    adrs: [ADR-0008, ADR-0010]
+    tests:
+      - TestReadyz_AllDepsUp_Returns200
+      - TestReadyz_RedisDown_Returns503
+      - TestReadyz_PostgresDown_Returns503
+    status: partial
+
+  - req: FR-010
+    description: "GET /metrics exports Prometheus metrics (RPS, latency, in-flight, rate-limit rejections, breaker state)."
+    capabilities: [CAP-004]
+    contexts: [CTX-003]
+    components: [COMP-013]
+    adrs: [ADR-0008]
+    tests:
+      - TestMetrics_ExposesRequiredMetrics
+    status: partial
+
+  - req: FR-011
+    description: "OpenTelemetry instrumentation: end-to-end trace per request; collector-down tolerated."
+    capabilities: [CAP-004]
+    contexts: [CTX-003]
+    components: [COMP-014]
+    adrs: [ADR-0008]
+    tests:
+      - TestTracing_EndToEndSpanCreated
+      - TestTracing_CollectorDown_DoesNotBreakRequest
+    status: partial
+
+  - req: FR-012
+    description: "Graceful shutdown on SIGINT/SIGTERM: drain in-flight, final metering flush (POL-005)."
+    capabilities: [CAP-005]
+    contexts: [CTX-001, CTX-004]
+    components: [COMP-006, COMP-017]
+    adrs: [ADR-0007]
+    tests:
+      - TestGracefulShutdown_DrainsInFlightRequests
+      - TestGracefulShutdown_FlushesMetering
+      - TestGracefulShutdown_TimeoutForced
+    status: partial
+
+  - req: FR-013
+    description: "Panic recovery middleware: log panic, return 500, process survives."
+    capabilities: [CAP-005]
+    contexts: [CTX-001]
+    components: [COMP-007]
+    adrs: [ADR-0008]
+    tests:
+      - TestPanicRecovery_Returns500AndContinues
+      - TestPanicRecovery_SubgoroutinePanicHandled
+    status: partial
+
+  - req: FR-014
+    description: "Async usage persistence to Postgres via in-memory buffer outside hot path (INV-003, INV-007, POL-004)."
+    capabilities: [CAP-006]
+    contexts: [CTX-004]
+    components: [COMP-016, COMP-017, COMP-018]
+    adrs: [ADR-0007, ADR-0005, ADR-0010]
+    tests:
+      - TestMetering_AsyncFlush_PersistsRecords
+      - TestMetering_BufferFull_DropsWithoutBlocking
+      - TestMetering_PostgresDown_NoHotpathBlock
+    status: partial
+
+  - req: FR-015
+    description: "Bounded worker pool limits upstream concurrency; saturation -> 503 + Retry-After (INV-001, POL-003)."
+    capabilities: [CAP-002]
+    contexts: [CTX-002]
+    components: [COMP-010]
+    adrs: [ADR-0003, ADR-0006]
+    tests:
+      - TestWorkerPool_Saturated_Returns503WithRetryAfter
+      - TestWorkerPool_RecoveryAfterSaturation
+    status: partial
+
+  - req: FR-016
+    description: "Structured slog logs per request with request_id, latency_ms, status_code at INFO."
+    capabilities: [CAP-004]
+    contexts: [CTX-003]
+    components: [COMP-015]
+    adrs: [ADR-0008]
+    tests:
+      - TestLogging_StructuredFieldsPresent
+      - TestLogging_PanicLoggedAtError
+    status: partial
+
+  - req: NFR-001
+    description: "Gateway p95 overhead <= 20ms under sustained load, excluding provider latency."
+    capabilities: [CAP-001]
+    contexts: [CTX-001]
+    components: [COMP-001, COMP-002]
+    adrs: [ADR-0006]
+    tests:
+      - BenchGateway_p95OverheadUnder20ms
+    status: partial
+
+  - req: NFR-002
+    description: "Under 2-3x overload: 0 crashes; all requests served or rejected with 429/503; recovers."
+    capabilities: [CAP-002, CAP-003]
+    contexts: [CTX-002]
+    components: [COMP-010, COMP-011]
+    adrs: [ADR-0002, ADR-0003, ADR-0006]
+    tests:
+      - BenchGateway_Overload3x_NocrashGracefulDegradation
+    status: partial
+
+  - req: NFR-003
+    description: "0 leaked goroutines (pprof before/after load test)."
+    capabilities: [CAP-002]
+    contexts: [CTX-002]
+    components: [COMP-010]
+    adrs: [ADR-0003]
+    tests:
+      - BenchGateway_GoroutineLeakCheck
+    status: partial
+
+  - req: NFR-004
+    description: "100% of boundaries (http.Server, upstream client, Redis, Postgres) have explicit timeouts."
+    capabilities: [CAP-001]
+    contexts: [CTX-001, CTX-002, CTX-004]
+    components: [COMP-001, COMP-004, COMP-005, COMP-009, COMP-018]
+    adrs: [ADR-0010]
+    tests:
+      - TestConfig_AllBoundariesHaveTimeouts
+    status: partial
+
+  - req: NFR-005
+    description: "0 in-flight requests dropped on SIGTERM (graceful drain completeness)."
+    capabilities: [CAP-005]
+    contexts: [CTX-001]
+    components: [COMP-006]
+    adrs: []
+    tests:
+      - TestGracefulShutdown_ZeroDropped
+    status: partial
+
+  - req: NFR-006
+    description: "Goroutines waiting on upstream are strictly bounded by worker pool size."
+    capabilities: [CAP-002]
+    contexts: [CTX-002]
+    components: [COMP-010]
+    adrs: [ADR-0003]
+    tests:
+      - BenchGateway_GoroutineCountBounded
+    status: partial
+
+  - req: NFR-007
+    description: "6/6 required metrics present in /metrics."
+    capabilities: [CAP-004]
+    contexts: [CTX-003]
+    components: [COMP-013]
+    adrs: [ADR-0008]
+    tests:
+      - TestMetrics_AllSixMetricsPresent
+    status: partial
+
+  - req: NFR-008
+    description: "0 race conditions detected under go test -race ./..."
+    capabilities: [CAP-001]
+    contexts: [CTX-001, CTX-002, CTX-004]
+    components: [COMP-002, COMP-008, COMP-010, COMP-011, COMP-016]
+    adrs: [ADR-0007]
+    tests:
+      - TestSuite_RaceFree
+    status: partial
+
+  - req: CON-001
+    description: "Stack fixed: Go 1.23+, stdlib-first (net/http, slog), pgx/v5, go-redis/v9, x/time/rate, x/sync/errgroup, sony/gobreaker, prometheus client, OTel SDK."
+    capabilities: []
+    contexts: [CTX-001, CTX-002, CTX-003, CTX-004]
+    components: [COMP-002, COMP-004, COMP-005, COMP-008, COMP-009, COMP-010, COMP-011, COMP-013, COMP-014, COMP-015, COMP-018]
+    adrs: [ADR-0006, ADR-0008, ADR-0009, ADR-0010]
+    tests: []
+    status: covered
+
+  - req: CON-002
+    description: "Minimal external dependencies; only defensible, actively-maintained choices."
+    capabilities: []
+    contexts: [CTX-001, CTX-002, CTX-003, CTX-004]
+    components: [COMP-004, COMP-005, COMP-009, COMP-011, COMP-018]
+    adrs: [ADR-0009, ADR-0010]
+    tests: []
+    status: covered
+
+  - req: CON-003
+    description: "One service, not microservices; idiomatic directory structure."
+    capabilities: []
+    contexts: [CTX-001, CTX-002, CTX-003, CTX-004]
+    components: [COMP-002, COMP-008, COMP-013, COMP-017]
+    adrs: [ADR-0006, ADR-0007, ADR-0008]
+    tests: []
+    status: covered
+
+  - req: CON-004
+    description: "CI: GitHub Actions — build + test -race + golangci-lint mandatory per PR."
+    capabilities: []
+    contexts: [CTX-001, CTX-002, CTX-003, CTX-004]
+    components: []
+    adrs: []
+    tests: []
+    status: covered
+
+  - req: CON-005
+    description: "make up brings up the full stack (gateway + postgres + redis + prometheus + grafana) via docker-compose."
+    capabilities: []
+    contexts: [CTX-001, CTX-002, CTX-003, CTX-004]
+    components: []
+    adrs: []
+    tests: []
+    status: covered
+
+  - req: CON-006
+    description: "Usage metrics written to Postgres exclusively asynchronously (no sync writes on hot path)."
+    capabilities: [CAP-006]
+    contexts: [CTX-004]
+    components: [COMP-016, COMP-017, COMP-018]
+    adrs: [ADR-0007]
+    tests: []
+    status: covered
+
+# Component -> planned code mapping (greenfield). Missing code is INFO until built (no _meta.as_built).
+components:
+  - id: COMP-001
+    name: HTTP Handler & Router
+    context: CTX-001
+    code: ["internal/proxy/**.go", "internal/server/**.go"]
+  - id: COMP-002
+    name: Proxy Core
+    context: CTX-001
+    code: ["internal/proxy/**.go"]
+  - id: COMP-003
+    name: Retry Engine
+    context: CTX-001
+    code: ["internal/proxy/retry/**.go"]
+  - id: COMP-004
+    name: Cache Adapter (CacheRepository)
+    context: CTX-001
+    code: ["internal/cache/**.go"]
+  - id: COMP-005
+    name: Provider Interface & Mock Adapter
+    context: CTX-001
+    code: ["internal/provider/**.go"]
+  - id: COMP-006
+    name: Lifecycle Manager
+    context: CTX-001
+    code: ["internal/lifecycle/**.go", "cmd/gateway/**.go"]
+  - id: COMP-007
+    name: Panic Recovery Middleware
+    context: CTX-001
+    code: ["internal/middleware/**.go"]
+  - id: COMP-008
+    name: Rate Limit Middleware
+    context: CTX-002
+    code: ["internal/ratelimit/**.go", "internal/middleware/**.go"]
+  - id: COMP-009
+    name: RateLimitRepository
+    context: CTX-002
+    code: ["internal/ratelimit/**.go"]
+  - id: COMP-010
+    name: Worker Pool / Backpressure
+    context: CTX-002
+    code: ["internal/pool/**.go"]
+  - id: COMP-011
+    name: Circuit Breaker
+    context: CTX-002
+    code: ["internal/breaker/**.go"]
+  - id: COMP-012
+    name: Health & Readiness Handlers
+    context: CTX-003
+    code: ["internal/health/**.go"]
+  - id: COMP-013
+    name: Metrics Registry & Exporter
+    context: CTX-003
+    code: ["internal/metrics/**.go"]
+  - id: COMP-014
+    name: OTel Tracing Middleware
+    context: CTX-003
+    code: ["internal/tracing/**.go", "internal/middleware/**.go"]
+  - id: COMP-015
+    name: Structured Logger
+    context: CTX-003
+    code: ["internal/logging/**.go"]
+  - id: COMP-016
+    name: Usage Buffer
+    context: CTX-004
+    code: ["internal/metering/**.go"]
+  - id: COMP-017
+    name: Metering Worker
+    context: CTX-004
+    code: ["internal/metering/**.go"]
+  - id: COMP-018
+    name: MeteringRepository
+    context: CTX-004
+    code: ["internal/metering/**.go"]

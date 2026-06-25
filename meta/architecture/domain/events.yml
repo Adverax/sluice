@@ -1,0 +1,109 @@
+# generated_by: forge:architect-domain-extraction
+# generated_at: 2026-06-24T00:00:00Z
+# tier: large
+
+events:
+  - id: EVT-001
+    name: CacheHit
+    triggered_by: CMD-001
+    aggregate: AGG-001
+    source: [US-006]
+    payload_summary: request_hash, cached_response, ttl_remaining
+
+  - id: EVT-002
+    name: InferenceCompleted
+    triggered_by: CMD-001
+    aggregate: AGG-001
+    source: [US-001, US-002, US-003]
+    payload_summary: request_id, provider, model, prompt_tokens, completion_tokens, latency_ms, status_code
+
+  - id: EVT-003
+    name: RateLimitRejected
+    triggered_by: CMD-001
+    aggregate: AGG-002
+    source: [US-005]
+    payload_summary: api_key, limit_type, retry_after_seconds
+
+  - id: EVT-004
+    name: CircuitOpenRejected
+    triggered_by: CMD-001
+    aggregate: AGG-003
+    source: [US-008]
+    payload_summary: provider, breaker_state, retry_after_ms
+
+  - id: EVT-005
+    name: BackpressureRejected
+    triggered_by: CMD-001
+    aggregate: AGG-001
+    source: [US-005, US-016]
+    payload_summary: queue_depth, retry_after_seconds
+
+  - id: EVT-006
+    name: RequestCancelled
+    triggered_by: CMD-002
+    aggregate: AGG-001
+    source: [US-004]
+    payload_summary: request_id, stage_at_cancellation
+
+  - id: EVT-007
+    name: LivenessChecked
+    triggered_by: CMD-003
+    aggregate: AGG-001
+    source: [US-009]
+    payload_summary: status_code
+
+  - id: EVT-008
+    name: ReadinessChecked
+    triggered_by: CMD-004
+    aggregate: AGG-001
+    source: [US-010]
+    payload_summary: status_code, redis_ok, postgres_ok
+
+  - id: EVT-009
+    name: MetricsScraped
+    triggered_by: CMD-005
+    aggregate: AGG-001
+    source: [US-011]
+    payload_summary: metrics_snapshot
+
+  - id: EVT-010
+    name: UsageBatchFlushed
+    triggered_by: CMD-006
+    aggregate: AGG-004
+    source: [US-015]
+    payload_summary: batch_size, flushed_at, dropped_count
+
+  - id: EVT-011
+    name: GracefulShutdownCompleted
+    triggered_by: CMD-007
+    aggregate: AGG-001
+    source: [US-013]
+    payload_summary: drained_requests, flushed_usage_events
+
+  - id: EVT-012
+    name: PanicRecovered
+    triggered_by: CMD-008
+    aggregate: AGG-001
+    source: [US-014]
+    payload_summary: request_id, panic_value, stack_trace
+
+  - id: EVT-013
+    name: CircuitBreakerStateChanged
+    triggered_by: external
+    aggregate: AGG-003
+    source: [US-008]
+    payload_summary: provider, from_state, to_state, reason
+
+  - id: EVT-014
+    name: UpstreamRetryAttempted
+    triggered_by: CMD-001
+    aggregate: AGG-001
+    source: [US-007]
+    payload_summary: request_id, attempt_number, backoff_ms, error_reason
+
+  - id: EVT-015
+    name: StreamingChunkForwarded
+    triggered_by: CMD-001
+    aggregate: AGG-001
+    source: [US-002]
+    payload_summary: request_id, chunk_sequence, bytes_forwarded

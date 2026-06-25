@@ -1,0 +1,76 @@
+# generated_by: forge:architect-domain-extraction
+# generated_at: 2026-06-24T00:00:00Z
+# tier: large
+
+aggregates:
+  - id: AGG-001
+    name: InferenceRequest
+    description: >
+      The lifecycle of a single request to an LLM through the gateway. Covers
+      routing, rate-check, cache-lookup, proxying to the provider (including retries
+      and circuit breaker), and streaming the response. Invariant: every request
+      completes with exactly one outcome (cache hit, provider response, error,
+      rate-limit, circuit-open).
+    invariants:
+      - id: INV-001
+        statement: >
+          Every request completes with exactly one observable outcome:
+          CacheHit, ProviderResponse, RateLimitRejected, CircuitOpen,
+          BackpressureRejected, or Error. Two outcomes simultaneously are impossible.
+      - id: INV-002
+        statement: >
+          If the client cancelled the request (closed the connection), the upstream
+          call must be interrupted before a response is received — no additional
+          work is performed.
+      - id: INV-003
+        statement: >
+          A request does not block the hot path while writing a usage event to
+          Postgres: a usage event is always written asynchronously (to the buffer),
+          never synchronously within the HTTP handler.
+
+  - id: AGG-002
+    name: RateLimitState
+    description: >
+      The state of the token-bucket rate limiter per API key. Manages the local
+      (`x/time/rate`) and distributed (Redis) counter. Invariant: tokens cannot
+      be issued when the limit is exhausted; exceeding the limit returns 429 with
+      Retry-After.
+    invariants:
+      - id: INV-004
+        statement: >
+          The number of consumed tokens does not exceed the configured limit per
+          unit of time. When exceeded, the request is rejected with 429 and a
+          Retry-After header; no tokens are consumed.
+
+  - id: AGG-003
+    name: CircuitBreakerState
+    description: >
+      The state of the circuit breaker per provider (sony/gobreaker). Tracks the
+      error history and manages transitions closed → open → half-open. Invariant:
+      in the open state all requests to the provider are immediately rejected
+      without calling upstream.
+    invariants:
+      - id: INV-005
+        statement: >
+          In the open state the circuit breaker immediately returns an error without
+          calling the upstream provider. No attempts to call the provider are made
+          while the circuit is open.
+      - id: INV-006
+        statement: >
+          The transition open → half-open occurs only after the recovery timeout
+          expires; the transition half-open → closed occurs only on a successful
+          probe request; half-open → open occurs on a failed probe request.
+
+  - id: AGG-004
+    name: UsageRecord
+    description: >
+      A record of resource consumption for a single request: provider, model,
+      tokens, cost, latency, status, request_id. Accumulated in an in-memory
+      buffer and flushed in batches to Postgres.
+    invariants:
+      - id: INV-007
+        statement: >
+          Every successfully handled request (including provider errors) produces
+          exactly one UsageRecord. The record is not lost as long as the buffer is
+          not full; when full the dropped counter is incremented without blocking
+          the request.

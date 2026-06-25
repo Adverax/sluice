@@ -1,0 +1,117 @@
+# generated_by: forge:architect-domain-extraction
+# generated_at: 2026-06-24T00:00:00Z
+# tier: large
+
+commands:
+  - id: CMD-001
+    name: SubmitChatCompletion
+    actor: ACT-001
+    target_aggregate: AGG-001
+    preconditions: [INV-004]
+    produces: [EVT-001, EVT-002, EVT-003, EVT-004, EVT-005]
+    source: [US-001, US-002, US-003]
+    description: >
+      The client sends POST /v1/chat/completions. The gateway checks the rate limit,
+      looks up the cache, routes to the provider, and returns the response (standard
+      or streaming). Completes with exactly one of the possible events.
+
+  - id: CMD-002
+    name: CancelRequest
+    actor: ACT-001
+    target_aggregate: AGG-001
+    preconditions: [INV-002]
+    produces: [EVT-006]
+    source: [US-004]
+    description: >
+      The client closes the connection before receiving a response. The gateway
+      interrupts the upstream call via context cancellation.
+
+  - id: CMD-003
+    name: CheckHealth
+    actor: ACT-002
+    target_aggregate: AGG-001
+    preconditions: []
+    produces: [EVT-007]
+    source: [US-009]
+    description: >
+      The orchestrator or operator requests GET /healthz. Returns 200 while the
+      process is alive.
+
+  - id: CMD-004
+    name: CheckReadiness
+    actor: ACT-002
+    target_aggregate: AGG-001
+    preconditions: []
+    produces: [EVT-008]
+    source: [US-010]
+    description: >
+      The operator requests GET /readyz. The gateway checks Redis and Postgres
+      availability and returns 200 or 503.
+
+  - id: CMD-005
+    name: ScrapeMetrics
+    actor: ACT-002
+    target_aggregate: AGG-001
+    preconditions: []
+    produces: [EVT-009]
+    source: [US-011]
+    description: >
+      The Prometheus scraper requests GET /metrics. The gateway returns the current
+      metrics in Prometheus exposition format.
+
+  - id: CMD-006
+    name: FlushUsageBatch
+    actor: ACT-003
+    target_aggregate: AGG-004
+    preconditions: [INV-007]
+    produces: [EVT-010]
+    source: [US-015]
+    description: >
+      The background worker flushes the accumulated batch of usage records to
+      Postgres. Triggered when the batch size threshold is reached or by a timer.
+
+  - id: CMD-007
+    name: GracefulShutdown
+    actor: ACT-002
+    target_aggregate: AGG-001
+    preconditions: []
+    produces: [EVT-011]
+    source: [US-013]
+    description: >
+      The operator sends SIGINT/SIGTERM. The gateway waits for in-flight requests
+      to complete, performs a final flush of the metering buffer, and shuts down.
+
+  - id: CMD-008
+    name: RecoverFromPanic
+    actor: ACT-003
+    target_aggregate: AGG-001
+    preconditions: []
+    produces: [EVT-012]
+    source: [US-014]
+    description: >
+      The recovery middleware intercepts a panic in the handler, logs it, and
+      returns a 500 to the client without bringing down the process.
+
+  - id: CMD-009
+    name: ConsumeRateLimitToken
+    actor: ACT-003
+    target_aggregate: AGG-002
+    preconditions: [INV-004]
+    produces: [EVT-003]
+    source: [US-005]
+    description: >
+      The rate-limiter middleware checks and deducts a token from the API key's
+      bucket. Called internally for every incoming request before routing.
+      When the bucket is exhausted, it emits EVT-003 (RateLimitRejected).
+
+  - id: CMD-010
+    name: RecordProviderOutcome
+    actor: ACT-003
+    target_aggregate: AGG-003
+    preconditions: [INV-005, INV-006]
+    produces: [EVT-013]
+    source: [US-008]
+    description: >
+      The circuit-breaker middleware records the outcome of a provider call (success
+      or failure). Updates the state of AGG-003. When the error threshold is crossed,
+      it emits EVT-013 (CircuitBreakerStateChanged).

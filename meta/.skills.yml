@@ -1,0 +1,41 @@
+version: 1
+stage: early-mvp
+language: en
+
+paths:
+  architecture: meta/architecture/
+  kanban: meta/kanban/
+  backlog: meta/kanban/backlog.md
+  backlog_scored: meta/kanban/backlog-scored.yml
+  roadmap: meta/kanban/roadmap.md
+  review_reports: meta/review/
+  fix_suppress: .claude/fix-suppress.yaml
+  retro: meta/kanban/retro.md
+
+methodology:
+  default: wsjf
+  per_category:
+    feature: rice
+    enabler: wsjf
+    tech-debt: wsjf
+    compliance: wsjf
+    ops: fifo
+
+# capacity is omitted — taken from stage (early-mvp)
+extra_categories: []
+
+# CI drift gate — .github/workflows/forge.yml is scaffolded from this block.
+# Set enabled: false to skip CI scaffolding. Gate levels: error | warn | off.
+ci:
+  enabled: true
+  gates:
+    validator_errors: error
+    blocking_decisions: error
+    stale_artifacts: warn
+    reverse_pending: off
+
+# Model profiles for spawning subagents (architect, kanban).
+# balanced = opus for heavy, sonnet for standard, haiku for mechanical.
+# budget / quality also available; comment out to inherit the session model.
+models:
+  profile: balanced

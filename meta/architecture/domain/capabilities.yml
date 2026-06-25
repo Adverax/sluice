@@ -1,0 +1,86 @@
+# generated_by: forge:architect-capability-mapping
+# generated_at: 2026-06-24T00:00:00Z
+# tier: large
+
+capabilities:
+  - id: CAP-001
+    name: Inference proxying
+    description: >
+      Accepting inference requests (POST /v1/chat/completions), routing to the
+      appropriate provider by the model field, proxying the response (plain JSON or
+      SSE stream), caching identical requests in Redis, retrying with backoff on
+      transient provider errors, cancelling the upstream call when the client
+      connection closes.
+    events: [EVT-001, EVT-002, EVT-006, EVT-014, EVT-015]
+    commands: [CMD-001, CMD-002]
+    aggregates: [AGG-001]
+    stories: [US-001, US-002, US-003, US-004, US-006, US-007]
+    requirements: [FR-001, FR-002, FR-003, FR-005, FR-006, NFR-001, NFR-004, NFR-008]
+
+  - id: CAP-002
+    name: Rate limiting and backpressure
+    description: >
+      Per-API-key request-rate limiting via a token bucket (local + Redis-distributed).
+      Upstream concurrency limiting via a bounded worker pool with backpressure when
+      the pool is saturated. Both mechanisms return a fast 429/503 with Retry-After
+      without blocking the hot path.
+    events: [EVT-003, EVT-005]
+    commands: [CMD-009]
+    aggregates: [AGG-002]
+    stories: [US-005, US-016]
+    requirements: [FR-004, FR-015, NFR-002, NFR-003, NFR-006]
+
+  - id: CAP-003
+    name: Circuit breaking
+    description: >
+      Protecting upstream providers with a circuit breaker (sony/gobreaker): recording
+      call outcomes, transitioning closed → open when the error threshold is exceeded,
+      fast-failing (< 1ms) in the open state, recovering via half-open after the
+      timeout expires. Prevents cascading failures when a provider degrades.
+    events: [EVT-004, EVT-013]
+    commands: [CMD-010]
+    aggregates: [AGG-003]
+    stories: [US-008]
+    requirements: [FR-007, NFR-002]
+
+  - id: CAP-004
+    name: Observability and health
+    description: >
+      Providing the operator and orchestrator with observability tools: a liveness
+      endpoint GET /healthz, a readiness endpoint GET /readyz (checks Redis +
+      Postgres), Prometheus metrics GET /metrics (RPS, latency histograms, in-flight
+      count, rate-limit rejections, breaker state), end-to-end OpenTelemetry traces,
+      structured slog logs per request with request-id, latency, and status.
+    events: [EVT-007, EVT-008, EVT-009]
+    commands: [CMD-003, CMD-004, CMD-005]
+    aggregates: [AGG-001]
+    stories: [US-009, US-010, US-011, US-012, US-017]
+    requirements: [FR-008, FR-009, FR-010, FR-011, FR-016, NFR-007]
+
+  - id: CAP-005
+    name: Runtime lifecycle
+    description: >
+      Managing the process lifecycle: graceful shutdown on SIGINT/SIGTERM (draining
+      in-flight requests, performing a final flush of the metering buffer before
+      exit), panic recovery middleware (catching panics in HTTP handlers, returning
+      500 without crashing the process). Guarantees service stability during both
+      orderly and unexpected terminations.
+    events: [EVT-011, EVT-012]
+    commands: [CMD-007, CMD-008]
+    aggregates: [AGG-001]
+    stories: [US-013, US-014]
+    requirements: [FR-012, FR-013, NFR-005]
+
+  - id: CAP-006
+    name: Usage metering
+    description: >
+      Asynchronous per-request recording of usage data (provider, model, tokens,
+      latency, status) to Postgres via an in-memory buffer outside the hot path.
+      A background worker flushes batches when the size threshold is reached or on
+      a timer. When the buffer overflows, events are dropped without blocking the
+      request; the dropped counter is tracked in metrics.
+    events: [EVT-010]
+    commands: [CMD-006]
+    aggregates: [AGG-004]
+    stories: [US-015]
+    requirements: [FR-014]

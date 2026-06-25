@@ -1,0 +1,40 @@
+# generated_by: forge:harness — do not edit inside the managed block; edit meta/.skills.yml or run /forge:harness
+#
+# Local backing infrastructure for `make run` and ad-hoc development.
+# NOTE (CON-005): the full stack also includes the gateway image, prometheus and
+# grafana. Those need a Dockerfile + deploy/ config that the implementation cards
+# create; they will be added here (above or below the managed block, or by a
+# /forge:harness sync once those facts exist). Integration tests use
+# testcontainers-go and spin up their own containers — they do not need this file.
+
+# >>> forge:harness (managed) >>>
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: sluice
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d sluice"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+# <<< forge:harness (managed) <<<

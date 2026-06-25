@@ -1,0 +1,13 @@
+# IDEs
+.idea/
+.vscode/
+
+# Go build artifacts
+/bin/
+/dist/
+*.test
+*.out
+
+# Local env
+.env
+.env.local

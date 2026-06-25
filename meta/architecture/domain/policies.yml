@@ -1,0 +1,61 @@
+# generated_by: forge:architect-domain-extraction
+# generated_at: 2026-06-24T00:00:00Z
+# tier: large
+
+policies:
+  - id: POL-001
+    name: RetryOnTransientUpstreamError
+    when: EVT-002
+    then: CMD-001
+    rationale: >
+      On idempotent/safe provider errors (5xx, timeout) the gateway retries the
+      request with exponential backoff and jitter, without exceeding the maximum
+      number of attempts and respecting the client's context deadline. Hides
+      transient provider failures from the client.
+
+  - id: POL-002
+    name: OpenCircuitOnRepeatedFailures
+    when: EVT-002
+    then: CMD-001
+    rationale: >
+      After a series of unsuccessful provider responses (circuit breaker threshold),
+      sony/gobreaker opens the circuit. Subsequent requests to that provider
+      immediately receive EVT-004 (CircuitOpenRejected) without calling upstream,
+      until the recovery timeout elapses.
+
+  - id: POL-003
+    name: BackpressureOnWorkerPoolSaturation
+    when: EVT-005
+    then: CMD-001
+    rationale: >
+      When the worker pool (bounded concurrency) is fully occupied and the queue is
+      saturated, new incoming requests immediately receive 503 with Retry-After
+      instead of being added to an unbounded queue. Prevents unlimited goroutine
+      growth.
+
+  - id: POL-004
+    name: FlushUsageOnBatchSizeOrTimer
+    when: "UsageBuffer reaches the size threshold OR the flush timer expires"
+    then: CMD-006
+    rationale: >
+      The background worker flushes accumulated usage events to Postgres in batches —
+      either when the batch size threshold is reached or when the timeout expires,
+      whichever comes first. Guarantees timely writes without blocking the hot path.
+
+  - id: POL-005
+    name: FinalFlushOnGracefulShutdown
+    when: EVT-011
+    then: CMD-006
+    rationale: >
+      On graceful shutdown (SIGINT/SIGTERM), after draining in-flight requests, a
+      final synchronous flush of remaining usage events is performed before closing
+      connection pools. Prevents loss of the last records during an orderly shutdown.
+
+  - id: POL-006
+    name: CancelUpstreamOnClientDisconnect
+    when: EVT-006
+    then: CMD-002
+    rationale: >
+      When the client cancels the request (closes the connection), the context is
+      cancelled throughout the entire stack, including the upstream HTTP call. Stops
+      work that does not need to be paid for.

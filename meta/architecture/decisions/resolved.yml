@@ -1,0 +1,63 @@
+# generated_by: forge:architect-adr-writer
+# generated_at: 2026-06-25T00:00:00Z
+
+resolved:
+  - id: DEC-001
+    question: "Behaviour when the Authorization header is missing (anonymous requests)"
+    resolved_by: ADR-0001
+    resolution_label: ephemeral_assigned_key
+    date: 2026-06-25
+
+  - id: DEC-002
+    question: "Specific circuit breaker thresholds (ConsecutiveFailures vs VolumeBased, %, timeout)"
+    resolved_by: ADR-0002
+    resolution_label: volume_based_50pct
+    date: 2026-06-25
+
+  - id: DEC-003
+    question: "Default worker pool size and configurability via env"
+    resolved_by: ADR-0003
+    resolution_label: env_configurable
+    date: 2026-06-25
+
+  - id: DEC-004
+    question: "Default response cache TTL and per-request override"
+    resolved_by: ADR-0004
+    resolution_label: default_5min_per_request_override
+    date: 2026-06-25
+
+  - id: DEC-005
+    question: "Maximum size of the in-memory usage-event buffer (UsageBuffer)"
+    resolved_by: ADR-0005
+    resolution_label: buffer_1000
+    date: 2026-06-25
+
+  - id: DEC-006
+    question: "Integration of CTX-001 (Proxy) with CTX-002 (Resilience) on the hot path"
+    resolved_by: ADR-0006
+    resolution_label: hybrid
+    date: 2026-06-25
+
+  - id: DEC-007
+    question: "Delivery of usage events from CTX-001 (Proxy) to CTX-004 (Metering)"
+    resolved_by: ADR-0007
+    resolution_label: buffered_channel_drop_on_full
+    date: 2026-06-25
+
+  - id: DEC-008
+    question: "Observability mechanism for CTX-003 to monitor the state of CTX-001, CTX-002, CTX-004"
+    resolved_by: ADR-0008
+    resolution_label: shared_prometheus_registry
+    date: 2026-06-25
+
+  - id: DEC-009
+    question: "Provider interface contract for integrating CTX-001 with EXT-001 (LlmProvider)"
+    resolved_by: ADR-0009
+    resolution_label: single_provider_interface
+    date: 2026-06-25
+
+  - id: DEC-010
+    question: "ACL strategy for integrating CTX-001/CTX-002 with EXT-002 (Redis) and CTX-004 with EXT-003 (Postgres)"
+    resolved_by: ADR-0010
+    resolution_label: repository_interface_per_context
+    date: 2026-06-25

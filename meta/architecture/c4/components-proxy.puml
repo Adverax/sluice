@@ -1,0 +1,127 @@
+@startuml
+!include <C4/C4_Component>
+
+' ============================================================================
+' sluice - LLM Gateway
+' C4 Level 3 (Component) diagram
+' Bounded Context: Proxy (CTX-001)
+' This is the OVERVIEW / first component file -> it carries the full COMP
+' inventory of the whole system as comments below. This diagram draws ONLY
+' the Proxy context components: COMP-001..COMP-007.
+' ============================================================================
+'
+' --------------------------------------------------------------------------
+' FULL SYSTEM COMPONENT INVENTORY
+' --------------------------------------------------------------------------
+' COMP-001  HTTP Handler & Router              CTX-001  CAP-001
+' COMP-002  Proxy Core                         CTX-001  CAP-001
+' COMP-003  Retry Engine                       CTX-001  CAP-001
+' COMP-004  Cache Adapter (CacheRepository)    CTX-001  CAP-001
+' COMP-005  Provider Interface & Mock Adapter  CTX-001  CAP-001
+' COMP-006  Lifecycle Manager                  CTX-001  CAP-005
+' COMP-007  Panic Recovery Middleware          CTX-001  CAP-005
+' COMP-008  Rate Limit Middleware              CTX-002  CAP-002
+' COMP-009  RateLimitRepository                CTX-002  CAP-002
+' COMP-010  Worker Pool / Backpressure         CTX-002  CAP-002
+' COMP-011  Circuit Breaker                    CTX-002  CAP-003
+' COMP-012  Health & Readiness Handlers        CTX-003  CAP-004
+' COMP-013  Metrics Registry & Exporter        CTX-003  CAP-004
+' COMP-014  OTel Tracing Middleware            CTX-003  CAP-004
+' COMP-015  Structured Logger                  CTX-003  CAP-004
+' COMP-016  Usage Buffer                       CTX-004  CAP-006
+' COMP-017  Metering Worker                    CTX-004  CAP-006
+' COMP-018  MeteringRepository                 CTX-004  CAP-006
+'
+' --------------------------------------------------------------------------
+' ARCHITECTURAL DECISIONS REFLECTED IN THIS DIAGRAM
+' --------------------------------------------------------------------------
+' ADR-0006  Request composition order:
+'           rate-limit middleware (429 before work; Resilience ctx)
+'             -> worker pool (backpressure 503; Resilience ctx)
+'             -> panic recovery (COMP-007)
+'             -> resolve provider (COMP-001/COMP-002)
+'             -> retry( breaker.Execute(providerCall) ).
+'           COMP-003 Retry Engine wraps the breaker call. On
+'           gobreaker.ErrOpenState it does NOT retry. v1 single mock
+'           provider => fast-fail 503 + Retry-After.
+' ADR-0009  Provider is a Go interface with TWO methods:
+'           Infer(ctx,req) (unary) and InferStream(ctx,req) (<-chan Chunk, error)
+'           for SSE streaming. COMP-005 is the interface + mock adapter (ACL to
+'           EXT-001 LlmProvider); adapters translate wire format + normalize usage.
+' ADR-0010  CacheRepository (COMP-004) is the ACL over go-redis/v9 to Redis
+'           (EXT-002). Cache TTL 5min default + X-Cache-TTL per-request override
+'           (ADR-0004). Streaming requests are NOT cached.
+' ADR-0007  Proxy publishes usage events to the Metering context via a buffered
+'           channel (non-blocking, drop-on-full). COMP-002 -> COMP-016 in-process.
+' ADR-0008  OTel tracing middleware + injected slog logger + shared
+'           *prometheus.Registry live in Observability context; referenced
+'           externally where natural.
+' INV-002   Client disconnect cancels upstream via context cancellation (POL-006).
+' --------------------------------------------------------------------------
+
+title "Components: Proxy Context (CTX-001)"
+
+Person(client, "API Client", "Sends inference requests (unary or SSE streaming)")
+
+System_Ext(llmProvider, "LLM Provider (mock)", "EXT-001")
+ContainerDb_Ext(redis, "Redis", "EXT-002\ngo-redis/v9 cache backend")
+
+' --- Cross-context: Resilience (CTX-002) ---
+Container_Boundary(resilience, "Resilience Context (CTX-002)") {
+    Component_Ext(rateLimit, "Rate Limit Middleware", "Go middleware", "COMP-008\n429 before work (ADR-0006)")
+    Component_Ext(workerPool, "Worker Pool / Backpressure", "Go bounded pool", "COMP-010\n503 on saturation")
+    Component_Ext(breaker, "Circuit Breaker", "gobreaker", "COMP-011\nExecute(providerCall); ErrOpenState => 503")
+}
+
+' --- Cross-context: Observability (CTX-003) ---
+Container_Boundary(observability, "Observability Context (CTX-003)") {
+    Component_Ext(tracing, "OTel Tracing Middleware", "Go middleware", "COMP-014 (ADR-0008)")
+    Component_Ext(logger, "Structured Logger", "slog", "COMP-015 (ADR-0008)")
+}
+
+' --- Cross-context: Metering (CTX-004) ---
+Container_Boundary(metering, "Metering Context (CTX-004)") {
+    Component_Ext(usageBuffer, "Usage Buffer", "Go buffered channel", "COMP-016\nnon-blocking, drop-on-full (ADR-0007)")
+}
+
+' === This context: Proxy (CTX-001) ===
+Container_Boundary(proxy, "Proxy Context") {
+
+    Component(panicRecovery, "Panic Recovery Middleware", "Go middleware", "COMP-007\nrecover -> 500; process survives")
+    Component(router, "HTTP Handler & Router", "Go net/http", "COMP-001\nRoutes by request 'model' field; resolves provider")
+    Component(core, "Proxy Core", "Go", "COMP-002\nOrchestrates cache, retry, provider call, usage publish; honors ctx cancellation (INV-002)")
+    Component(cacheAdapter, "Cache Adapter (CacheRepository)", "Go ACL / go-redis/v9", "COMP-004\nTTL 5min default + X-Cache-TTL override (ADR-0004,0010); streaming NOT cached")
+    Component(retryEngine, "Retry Engine", "Go", "COMP-003\nWraps breaker.Execute(providerCall); no retry on ErrOpenState (ADR-0006)")
+    Component(provider, "Provider Interface & Mock Adapter", "Go interface + ACL", "COMP-005\nInfer / InferStream (ADR-0009); wire translation + usage normalization")
+    Component(lifecycle, "Lifecycle Manager", "Go", "COMP-006\nGraceful shutdown: drain in-flight, then final metering flush")
+}
+
+' --------------------------------------------------------------------------
+' RELATIONSHIPS (request flow, ADR-0006 composition order)
+' --------------------------------------------------------------------------
+Rel(client, rateLimit, "HTTP request", "JSON / SSE")
+Rel(rateLimit, workerPool, "Admits request (429 if limited)")
+Rel(workerPool, panicRecovery, "Dispatches to worker (503 on backpressure)")
+Rel(panicRecovery, router, "Forwards request (recovers panics -> 500)")
+Rel(router, core, "Resolves provider, invokes core")
+
+Rel(core, cacheAdapter, "Lookup / store cached response (skip for streaming)")
+Rel(cacheAdapter, redis, "GET / SETEX", "go-redis/v9")
+
+Rel(core, retryEngine, "Execute inference with retry policy")
+Rel(retryEngine, breaker, "breaker.Execute(providerCall)")
+Rel(breaker, provider, "Calls provider (closed state)")
+Rel(provider, llmProvider, "Infer / InferStream", "wire protocol")
+
+Rel(core, usageBuffer, "Publishes usage event", "in-process channel (drop-on-full)")
+
+' Observability cross-cutting
+Rel(tracing, panicRecovery, "Wraps handler chain (spans)")
+Rel_Back(core, logger, "Structured logs")
+
+' Lifecycle
+Rel(lifecycle, workerPool, "Drains in-flight requests on shutdown")
+Rel(lifecycle, usageBuffer, "Triggers final metering flush on shutdown")
+
+SHOW_LEGEND()
+@enduml

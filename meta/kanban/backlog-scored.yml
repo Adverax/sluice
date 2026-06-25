@@ -1,0 +1,101 @@
+generated: 2026-06-25
+source: meta/kanban/backlog.md
+config:
+  stage: early-mvp
+  methodology:
+    feature: rice
+    enabler: wsjf
+    tech-debt: wsjf
+    compliance: wsjf
+    ops: fifo
+
+ideas:
+  - id: IDEA-001
+    title: "Fallback-provider routing on ErrOpenState (multi-provider failover)"
+    raw: "- [ ] Fallback-provider routing on ErrOpenState (multi-provider failover)   @feature"
+    category: feature
+    status: backlog
+    method: rice
+    scores:
+      reach: 50
+      impact: 1
+      confidence: 0.8
+      effort: 3
+    reasoning:
+      reach: "Portfolio-repo nominal; only relevant once multiple real providers exist (a v1 non-goal)"
+      impact: "Medium: demonstrates multi-provider resilience maturity, not core to the 5 signals"
+      confidence: "Design is clear (ErrOpenState -> route to fallback), but gated on multi-provider support"
+      effort: "Routing table + multi-provider config + failover tests (~3 person-weeks)"
+    priority_score: 13.3
+    depends_on: []
+    precondition: "Multiple real providers (currently out of scope per vision Non-goals)"
+    wave: 1
+    rank: 1
+
+  - id: IDEA-002
+    title: "Per-IP ephemeral-key issuance cap (anti-bypass hardening)"
+    raw: "- [ ] Per-IP ephemeral-key issuance cap (anti-bypass hardening)   @compliance"
+    category: compliance
+    status: backlog
+    method: wsjf
+    scores:
+      user_business_value: 3
+      time_criticality: 2
+      risk_reduction: 5
+      job_size: 2
+    reasoning:
+      user_business_value: "Security hardening; no direct user value"
+      time_criticality: "No deadline"
+      risk_reduction: "Closes the documented rate-limit bypass (discard-key-per-request) from ADR-0001"
+      job_size: "Small: per-IP counter on key issuance"
+    priority_score: 5.0
+    depends_on: []
+    builds_on: "CARD-005 (rate limiting, in kanban)"
+    wave: 1
+    rank: 1
+
+  - id: IDEA-003
+    title: "Durable queue / WAL for billing-grade metering"
+    raw: "- [ ] Durable queue / WAL for billing-grade metering   @enabler"
+    category: enabler
+    status: backlog
+    method: wsjf
+    scores:
+      user_business_value: 5
+      time_criticality: 2
+      risk_reduction: 8
+      job_size: 5
+    reasoning:
+      user_business_value: "Maturity signal; matters only if usage metering becomes revenue-critical"
+      time_criticality: "No deadline"
+      risk_reduction: "Eliminates drop-on-full data loss (ADR-0007); unlocks a billing-grade story"
+      job_size: "Substantial: WAL or Kafka integration + replay"
+    priority_score: 3.0
+    depends_on: []
+    builds_on: "CARD-010 (metering, in kanban)"
+    wave: 1
+    rank: 1
+
+  - id: IDEA-004
+    title: "FR-003: add a negative/boundary acceptance criterion (cancel-after-response)"
+    raw: "- [ ] FR-003: add a negative/boundary acceptance criterion (cancel-after-response)   @tech-debt"
+    category: tech-debt
+    status: backlog
+    method: wsjf
+    scores:
+      user_business_value: 2
+      time_criticality: 1
+      risk_reduction: 3
+      job_size: 1
+    reasoning:
+      user_business_value: "Test-completeness; no direct user value"
+      time_criticality: "None"
+      risk_reduction: "Closes the FR-003 happy-path-only AC coverage gap (handoff §5)"
+      job_size: "Tiny: one negative/boundary test (cancel after upstream already responded)"
+    priority_score: 6.0
+    depends_on: []
+    builds_on: "CARD-004 (context cancellation, in kanban)"
+    created_wave: 1
+    deferred_waves: 0
+    wave: 1
+    rank: 1

@@ -1,0 +1,24 @@
+# meta/kanban/config.yml
+implementation_skill: golang-pro   # fallback; decompose auto-detects per card
+
+tdd: false            # spec writes tests per-layer (§12), not strict test-first; cards still require ACs green
+
+review:
+  enabled: true
+  min_score: 8
+  max_cycles: 3
+  min_improvement: 0.5
+  build_fix_attempts: 2
+  test_command: ""        # empty → auto-detect: go build ./... && go test ./...
+  parallel: false
+
+dispatcher:
+  max_concurrent: 5
+
+done:
+  require_pr: false
+  target_branch: ""       # auto-detect (main)
+
+sizing:
+  min_estimate: 0.5d
+  max_estimate: 3d

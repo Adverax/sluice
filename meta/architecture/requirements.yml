@@ -1,0 +1,571 @@
+# generated_by: forge:architect-domain-extraction
+# generated_at: 2026-06-24T00:00:00Z
+# tier: large
+
+functional:
+  - id: FR-001
+    statement: >
+      Gateway proxies POST /v1/chat/completions to the selected provider and
+      returns the response to the client (plain JSON or SSE stream).
+    source: [US-001, US-002]
+    acceptance:
+      - id: AC-001
+        given: valid request with model and messages, provider is available and responds 200
+        when: API Client sends POST /v1/chat/completions
+        then: gateway returns 200 with the provider response body within < upstream latency + 20ms overhead
+        kind: happy
+        test: TestProxy_HappyPath_NonStreaming
+      - id: AC-002
+        given: valid request with "stream":true, provider is available
+        when: API Client sends POST /v1/chat/completions
+        then: gateway returns 200 with Content-Type text/event-stream and forwards SSE chunks as they arrive
+        kind: happy
+        test: TestProxy_HappyPath_Streaming
+      - id: AC-003
+        given: provider returns 500
+        when: API Client sends POST /v1/chat/completions (retries exhausted)
+        then: gateway returns 502 with a JSON error body
+        kind: error
+        test: TestProxy_ProviderError_Returns502
+      - id: AC-004
+        given: request body is absent or is not valid JSON
+        when: API Client sends POST /v1/chat/completions
+        then: gateway returns 400 without contacting the provider
+        kind: negative
+        test: TestProxy_InvalidBody_Returns400
+
+  - id: FR-002
+    statement: >
+      Gateway routes the request to the correct provider based on the model
+      field in the request body.
+    source: [US-003]
+    acceptance:
+      - id: AC-005
+        given: two providers are registered in the configuration for different models
+        when: API Client specifies model "gpt-4"
+        then: gateway routes the request to the provider registered for "gpt-4"
+        kind: happy
+        test: TestRouter_RoutesToCorrectProvider
+      - id: AC-006
+        given: model field is absent from the request body
+        when: API Client sends POST /v1/chat/completions
+        then: gateway returns 400 without contacting the provider
+        kind: negative
+        test: TestRouter_MissingModel_Returns400
+      - id: AC-007
+        given: model field refers to an unregistered model
+        when: API Client sends POST /v1/chat/completions
+        then: gateway returns 404 without contacting the provider
+        kind: negative
+        test: TestRouter_UnknownModel_Returns404
+
+  - id: FR-003
+    statement: >
+      When the client connection is closed, gateway immediately cancels the upstream
+      call via context cancellation.
+    source: [US-004]
+    acceptance:
+      - id: AC-008
+        given: a request to the provider is in flight, mock provider has 500ms latency
+        when: client closes the connection 100ms after sending the request
+        then: upstream HTTP call terminates with context.Canceled within 50ms of the connection being closed
+        kind: happy
+        invariant: INV-002
+        policy: POL-006
+        test: TestProxy_ClientCancel_AbortsUpstream
+      - id: AC-009
+        given: SSE stream is active, provider is sending chunks
+        when: client closes the connection
+        then: gateway stops forwarding chunks and the upstream call is cancelled
+        kind: happy
+        invariant: INV-002
+        test: TestProxy_StreamingClientCancel_AbortsUpstream
+      - id: AC-052
+        given: two requests A and B are in flight to the provider, each with 500ms latency
+        when: client A closes its connection 100ms in while client B stays connected
+        then: A's upstream call is cancelled with context.Canceled, while B's upstream call is unaffected and completes normally with a 200 response (per-request context isolation)
+        kind: concurrency
+        invariant: INV-002
+        test: TestProxy_ClientCancel_DoesNotAffectOtherInflight
+
+  - id: FR-004
+    statement: >
+      Gateway enforces per-API-key rate limiting (token bucket, local +
+      Redis). When the limit is exceeded it returns 429 with a Retry-After header.
+    source: [US-005]
+    acceptance:
+      - id: AC-010
+        given: API key "key-A" with limit 10 RPS, 10 requests already served within 1 second
+        when: the 11th request arrives
+        then: gateway returns 429 with a Retry-After header and does not contact the provider
+        kind: happy
+        invariant: INV-004
+        test: TestRateLimit_ExceedLimit_Returns429WithRetryAfter
+      - id: AC-011
+        given: API key "key-A" with limit 10 RPS, only 5 requests served within 1 second
+        when: the next request arrives
+        then: gateway passes the request to the provider without 429
+        kind: happy
+        test: TestRateLimit_WithinLimit_Passes
+      - id: AC-012
+        given: Authorization header is absent from the request
+        when: a request arrives at POST /v1/chat/completions
+        then: gateway applies rate limiting for the anonymous key or returns 401
+        kind: negative
+        test: TestRateLimit_MissingApiKey_HandledGracefully
+      - id: AC-013
+        given: two gateway instances share one Redis, API key with a shared limit of 100 RPS
+        when: 60 requests arrive on the first instance and 60 on the second simultaneously
+        then: no more than 100 requests total pass per second; the rest receive 429
+        kind: boundary
+        test: TestRateLimit_DistributedRedis_GlobalLimit
+
+  - id: FR-005
+    statement: >
+      Gateway caches responses to identical requests in Redis with a TTL; subsequent
+      identical requests are served from the cache.
+    source: [US-006]
+    acceptance:
+      - id: AC-014
+        given: a request with body {"model":"mock","messages":[...]} has been executed and cached
+        when: an identical request arrives within the TTL
+        then: "gateway returns the cached response with header X-Cache: HIT without contacting the provider"
+        kind: happy
+        test: TestCache_Hit_ReturnsCachedResponse
+      - id: AC-015
+        given: cache is empty or TTL has expired
+        when: a request arrives
+        then: "gateway contacts the provider and caches the new response; returns X-Cache: MISS"
+        kind: happy
+        test: TestCache_Miss_FetchesAndCaches
+      - id: AC-016
+        given: request has "stream":true
+        when: the request arrives
+        then: streaming responses are not cached (cache key is not computed)
+        kind: negative
+        test: TestCache_StreamingNotCached
+      - id: AC-017
+        given: Redis is unavailable
+        when: a request arrives
+        then: gateway bypasses the cache and proxies to the provider without error
+        kind: error
+        test: TestCache_RedisDown_FallsThrough
+
+  - id: FR-006
+    statement: >
+      Gateway retries idempotent/safe upstream errors with exponential
+      backoff + jitter, bounded retry count, and respect for the context deadline.
+    source: [US-007]
+    acceptance:
+      - id: AC-018
+        given: provider returns 503 on the first 2 requests, then 200
+        when: API Client sends a request
+        then: gateway performs 2 retries and returns the successful response to the client
+        kind: happy
+        policy: POL-001
+        test: TestRetry_TransientError_SucceedsOnThirdAttempt
+      - id: AC-019
+        given: provider consistently returns 503, maximum attempts = 3
+        when: API Client sends a request
+        then: gateway returns 502 after exhausting all attempts
+        kind: negative
+        test: TestRetry_ExhaustedAttempts_Returns502
+      - id: AC-020
+        given: client context deadline expires during a retry
+        when: gateway attempts to perform the retry
+        then: retry does not start; 499 or 503 is returned with cancellation information
+        kind: boundary
+        test: TestRetry_ContextDeadlineExpired_NoRetry
+      - id: AC-021
+        given: provider returns 400 (client error, not idempotent)
+        when: API Client sends a request
+        then: gateway does not retry and immediately returns the provider's response
+        kind: negative
+        test: TestRetry_ClientError_NoRetry
+
+  - id: FR-007
+    statement: >
+      Gateway protects the upstream provider with a circuit breaker (sony/gobreaker):
+      after a series of errors it opens the circuit and fast-fails requests until recovery.
+    source: [US-008]
+    acceptance:
+      - id: AC-022
+        given: circuit breaker is in open state for provider P
+        when: a request arrives for provider P
+        then: gateway immediately returns 503 without contacting P; latency < 1ms
+        kind: happy
+        invariant: INV-005
+        test: TestCircuitBreaker_OpenState_FastFail
+      - id: AC-023
+        given: provider P returns errors exceeding the breaker threshold
+        when: gateway records the next error
+        then: circuit breaker transitions to open state; subsequent requests receive EVT-004
+        kind: happy
+        invariant: INV-006
+        policy: POL-002
+        test: TestCircuitBreaker_ThresholdExceeded_Opens
+      - id: AC-024
+        given: circuit breaker is in open state, recovery timeout has elapsed
+        when: a probe request arrives in half-open state
+        then: provider responds successfully → circuit transitions to closed; response is returned to client
+        kind: boundary
+        invariant: INV-006
+        test: TestCircuitBreaker_HalfOpen_SuccessClosesCircuit
+
+  - id: FR-008
+    statement: >
+      GET /healthz returns 200 OK as long as the process is alive.
+    source: [US-009]
+    acceptance:
+      - id: AC-025
+        given: process is running
+        when: orchestrator sends GET /healthz
+        then: returns 200 OK with body {"status":"ok"} or empty
+        kind: happy
+        test: TestHealthz_ReturnsOK
+
+  - id: FR-009
+    statement: >
+      GET /readyz returns 200 OK when Redis and Postgres are available, and 503 when
+      at least one dependency is unavailable.
+    source: [US-010]
+    acceptance:
+      - id: AC-026
+        given: Redis and Postgres are available
+        when: operator sends GET /readyz
+        then: returns 200 OK with a body including the status of both dependencies
+        kind: happy
+        test: TestReadyz_AllDepsUp_Returns200
+      - id: AC-027
+        given: Redis is unavailable (container stopped)
+        when: operator sends GET /readyz
+        then: returns 503 with a body showing redis:down
+        kind: negative
+        test: TestReadyz_RedisDown_Returns503
+      - id: AC-028
+        given: Postgres is unavailable (container stopped)
+        when: operator sends GET /readyz
+        then: returns 503 with a body showing postgres:down
+        kind: negative
+        test: TestReadyz_PostgresDown_Returns503
+
+  - id: FR-010
+    statement: >
+      GET /metrics exports Prometheus metrics: RPS, latency histograms,
+      in-flight count, rate-limit rejections, breaker state.
+    source: [US-011]
+    acceptance:
+      - id: AC-029
+        given: several requests to gateway have been executed
+        when: Prometheus scraper sends GET /metrics
+        then: response contains metrics http_requests_total, http_request_duration_seconds, gateway_inflight_requests, ratelimit_rejected_total, breaker_state in Prometheus text format
+        kind: happy
+        test: TestMetrics_ExposesRequiredMetrics
+
+  - id: FR-011
+    statement: >
+      Gateway is instrumented with OpenTelemetry: each request produces an end-to-end
+      trace with spans from the incoming HTTP request to the provider response.
+    source: [US-012]
+    acceptance:
+      - id: AC-030
+        given: OTel collector is available, gateway is configured with an OTel exporter
+        when: API Client sends a request
+        then: "OTel collector receives a trace with at least two spans: incoming HTTP and upstream call"
+        kind: happy
+        test: TestTracing_EndToEndSpanCreated
+      - id: AC-050
+        given: OTel collector is unavailable (network unreachable)
+        when: API Client sends a request
+        then: request is processed successfully (200); trace export error is logged but does not interrupt processing
+        kind: error
+        test: TestTracing_CollectorDown_DoesNotBreakRequest
+
+  - id: FR-012
+    statement: >
+      Gateway drains in-flight requests upon receiving SIGINT/SIGTERM before
+      the process exits (graceful shutdown).
+    source: [US-013]
+    acceptance:
+      - id: AC-031
+        given: 5 in-flight requests are active, mock provider responds with 200ms latency
+        when: process receives SIGTERM
+        then: all 5 requests complete successfully; process exits after them with log "drained N requests"
+        kind: happy
+        test: TestGracefulShutdown_DrainsInFlightRequests
+      - id: AC-032
+        given: metering buffer holds 50 usage events at the moment SIGTERM is received
+        when: process finishes draining in-flight requests
+        then: all 50 usage events are flushed to Postgres before exit
+        kind: happy
+        policy: POL-005
+        test: TestGracefulShutdown_FlushesMetering
+      - id: AC-051
+        given: in-flight requests do not complete within the shutdown timeout (e.g. 30s)
+        when: shutdown timeout elapses
+        then: process is forcibly terminated; in-flight requests receive a connection error; log contains the count of unfinished requests
+        kind: boundary
+        test: TestGracefulShutdown_TimeoutForced
+
+  - id: FR-013
+    statement: >
+      Panic recovery middleware intercepts panics in HTTP handlers, logs
+      them, and returns 500 without crashing the process.
+    source: [US-014]
+    acceptance:
+      - id: AC-033
+        given: handler calls panic("test panic")
+        when: an HTTP request arrives at that handler
+        then: process continues running, client receives 500, panic value and stack trace are recorded in logs
+        kind: happy
+        test: TestPanicRecovery_Returns500AndContinues
+      - id: AC-034
+        given: panic occurs in a goroutine of the handler that is separate from the main stack
+        when: panic occurs
+        then: process does not terminate; the next incoming HTTP request receives a 200 or 500 response without hanging
+        kind: negative
+        test: TestPanicRecovery_SubgoroutinePanicHandled
+
+  - id: FR-014
+    statement: >
+      Usage records (provider, model, tokens, latency, status) are persisted
+      asynchronously to Postgres via an in-memory buffer outside the hot request path.
+    source: [US-015]
+    acceptance:
+      - id: AC-035
+        given: API Client has made 100 requests, metering buffer is not full
+        when: background worker flushes a batch
+        then: 100 records appear in the usage_events table in Postgres
+        kind: happy
+        invariant: INV-007
+        policy: POL-004
+        test: TestMetering_AsyncFlush_PersistsRecords
+      - id: AC-036
+        given: metering buffer is full (capacity=N), the (N+1)th request arrives
+        when: gateway finishes processing the (N+1)th request
+        then: the (N+1)th record is dropped, the metering_events_dropped_total counter increments by 1; hot path is not blocked
+        kind: boundary
+        invariant: INV-003
+        test: TestMetering_BufferFull_DropsWithoutBlocking
+      - id: AC-037
+        given: Postgres is unavailable at flush time
+        when: background worker attempts to INSERT a batch
+        then: error is logged, batch is not silently lost (retry or drop with log), hot path is not blocked
+        kind: error
+        test: TestMetering_PostgresDown_NoHotpathBlock
+
+  - id: FR-015
+    statement: >
+      Gateway limits concurrency to upstream providers via a bounded worker
+      pool; when the pool is saturated it applies backpressure (503 with Retry-After).
+    source: [US-016]
+    acceptance:
+      - id: AC-038
+        given: worker pool is limited to N=10 slots, 10 requests are already in flight
+        when: the 11th request arrives
+        then: gateway immediately returns 503 with Retry-After; goroutine count does not grow
+        kind: happy
+        invariant: INV-001
+        policy: POL-003
+        test: TestWorkerPool_Saturated_Returns503WithRetryAfter
+      - id: AC-039
+        given: worker pool is saturated, then 5 slots become free
+        when: new requests arrive
+        then: the next 5 requests are accepted without 503
+        kind: boundary
+        test: TestWorkerPool_RecoveryAfterSaturation
+
+  - id: FR-016
+    statement: >
+      Gateway writes structured logs (slog) with request-id, latency, and status
+      per-request at INFO level.
+    source: [US-017]
+    acceptance:
+      - id: AC-040
+        given: any request to gateway
+        when: request completes
+        then: slog record contains fields request_id, latency_ms, and status_code
+        kind: happy
+        test: TestLogging_StructuredFieldsPresent
+      - id: AC-041
+        given: panic in a handler
+        when: panic recovery fires
+        then: log record contains ERROR level and the panic_value field
+        kind: negative
+        test: TestLogging_PanicLoggedAtError
+
+non_functional:
+  - id: NFR-001
+    category: performance
+    metric: gateway_p95_overhead_ms
+    threshold: 20ms
+    condition: under sustained load of several thousand RPS, excluding provider latency
+    rationale: >
+      The goal is a thin, predictable layer. The gateway p95 overhead (excluding model
+      latency) must remain ≤ 20ms so as not to add meaningful delay to real
+      LLM calls.
+    acceptance:
+      - id: AC-042
+        given: mock provider with fixed 0ms latency, load of several thousand RPS
+        when: load test (k6/vegeta) runs for 5 minutes
+        then: gateway p95 latency (overhead) <= 20ms across the entire plateau
+        kind: boundary
+        test: BenchGateway_p95OverheadUnder20ms
+
+  - id: NFR-002
+    category: availability
+    metric: error_rate_under_overload
+    threshold: "0% crashes; 100% requests either served or rejected with 429/503"
+    condition: under load of 2–3× nominal capacity
+    rationale: >
+      Under overload the service must not crash. Excess requests are rejected with
+      429/503, but the process continues running and recovers once load subsides.
+    acceptance:
+      - id: AC-043
+        given: load at 3× nominal RPS for 2 minutes
+        when: load test runs
+        then: no panics occur, process uptime is 100%, all responses are 200/429/503; after load drops gateway accepts requests
+        kind: boundary
+        test: BenchGateway_Overload3x_NocrashGracefulDegradation
+
+  - id: NFR-003
+    category: maintainability
+    metric: goroutine_leak_count
+    threshold: "0 leaked goroutines"
+    condition: pprof measurement before and after load test
+    rationale: >
+      Goroutine leaks are a direct symptom of concurrency management errors.
+      A pprof snapshot taken before and after the load test must show the same
+      baseline goroutine count.
+    acceptance:
+      - id: AC-044
+        given: baseline goroutine count recorded before the load test
+        when: load test completes and load has subsided
+        then: goroutine count equals baseline (tolerance ±5 background goroutines)
+        kind: boundary
+        test: BenchGateway_GoroutineLeakCheck
+
+  - id: NFR-004
+    category: operability
+    metric: timeout_coverage
+    threshold: "100% of boundaries have timeouts"
+    condition: static analysis of http.Server, upstream client, Redis, Postgres configuration
+    rationale: >
+      Unbounded waits are the root cause of goroutine leaks and hangs under load.
+      Every boundary (HTTP server, upstream client, Redis, Postgres) must have
+      an explicit timeout.
+    acceptance:
+      - id: AC-045
+        given: configuration of the running service
+        when: ReadTimeout, WriteTimeout, IdleTimeout of http.Server; upstream http.Client timeout; Redis dial/read timeout; pgx pool acquire timeout are checked
+        then: all six timeouts are > 0
+        kind: happy
+        test: TestConfig_AllBoundariesHaveTimeouts
+
+  - id: NFR-005
+    category: operability
+    metric: graceful_shutdown_drain_completeness
+    threshold: "0 in-flight requests dropped on SIGTERM"
+    condition: when in-flight request count > 0 at the moment SIGTERM is received
+    rationale: >
+      A normal deployment must not interrupt in-flight requests. Gateway waits for
+      all active requests to complete before exiting.
+    acceptance:
+      - id: AC-046
+        given: 10 in-flight requests, mock with 300ms latency
+        when: SIGTERM is received
+        then: all 10 requests complete successfully; process exit code 0; log contains "drained 10 requests"
+        kind: happy
+        test: TestGracefulShutdown_ZeroDropped
+
+  - id: NFR-006
+    category: scalability
+    metric: upstream_goroutine_count_bounded
+    threshold: "<= worker_pool_limit goroutines waiting on upstream"
+    condition: under any incoming load
+    rationale: >
+      The number of goroutines waiting for an upstream response is strictly bounded
+      by the pool size. Exceeding this limit indicates missing backpressure.
+    acceptance:
+      - id: AC-047
+        given: worker pool limit = 50, load of 500 RPS
+        when: load test runs for 1 minute
+        then: goroutine count on the upstream path never exceeds 50
+        kind: boundary
+        test: BenchGateway_GoroutineCountBounded
+
+  - id: NFR-007
+    category: observability
+    metric: required_metrics_exposed
+    threshold: "6/6 required metrics present in /metrics"
+    condition: at any point during service operation
+    rationale: >
+      Without the full set of metrics an operator cannot diagnose problems via Grafana.
+      The required metric set is fixed in the specification.
+    acceptance:
+      - id: AC-048
+        given: gateway is running with Prometheus enabled
+        when: GET /metrics is requested
+        then: response contains http_requests_total, http_request_duration_seconds, gateway_inflight_requests, provider_request_duration_seconds, ratelimit_rejected_total, breaker_state
+        kind: happy
+        test: TestMetrics_AllSixMetricsPresent
+
+  - id: NFR-008
+    category: maintainability
+    metric: test_race_free
+    threshold: "0 race conditions detected"
+    condition: when running go test -race ./...
+    rationale: >
+      Data races are the root cause of flaky load tests and production incidents.
+      All tests must pass with the race detector enabled.
+    acceptance:
+      - id: AC-049
+        given: full test suite
+        when: go test -race ./... is run
+        then: tests complete with exit code 0, no "DATA RACE" messages
+        kind: happy
+        test: TestSuite_RaceFree
+
+constraints:
+  - id: CON-001
+    type: technical
+    statement: >
+      Language and stack are fixed: Go 1.23+, stdlib-first (net/http, log/slog), no heavy
+      web frameworks, no "magic" ORMs. Dependencies: pgx/v5, go-redis/v9,
+      golang.org/x/time/rate, golang.org/x/sync/errgroup, sony/gobreaker,
+      prometheus/client_golang, OpenTelemetry SDK.
+    source: doc/requirements.md §3, §9
+
+  - id: CON-002
+    type: technical
+    statement: >
+      Minimal external dependencies; no exotic packages — only defensible
+      choices with active communities.
+    source: doc/requirements.md §9
+
+  - id: CON-003
+    type: organizational
+    statement: >
+      One service, not microservices. Idiomatic directory structure per
+      doc/requirements.md §4.
+    source: doc/requirements.md §4, §9
+
+  - id: CON-004
+    type: technical
+    statement: >
+      CI: GitHub Actions — build + test -race + golangci-lint are mandatory for every PR.
+    source: doc/requirements.md §3
+
+  - id: CON-005
+    type: technical
+    statement: >
+      make up brings up the full stack (gateway + postgres + redis + prometheus + grafana)
+      via docker-compose with a single command.
+    source: doc/requirements.md §3
+
+  - id: CON-006
+    type: technical
+    statement: >
+      Writing usage metrics to Postgres is performed exclusively asynchronously (outside
+      the hot HTTP handler path). Synchronous writes on the request path are prohibited.
+    source: doc/requirements.md §7, US-015

@@ -1,0 +1,29 @@
+# generated_by: forge:architect-domain-extraction
+# generated_at: 2026-06-24T00:00:00Z
+# tier: large
+
+actors:
+  - id: ACT-001
+    name: ApiClient
+    type: system
+    description: >
+      A consumer application that sends inference requests via
+      POST /v1/chat/completions. Identified by an API key in the Authorization
+      header. In v1 the key is used only for rate limiting and usage metrics,
+      without validation.
+
+  - id: ACT-002
+    name: Operator
+    type: human
+    description: >
+      An SRE / DevOps engineer who monitors the service via /metrics, /healthz,
+      /readyz, and Grafana. Responds to overload and degradation. Manages the
+      process lifecycle (start, stop, scale).
+
+  - id: ACT-003
+    name: Scheduler
+    type: scheduler
+    description: >
+      An internal scheduler (background worker). Periodically flushes batches of
+      usage events to Postgres and performs other background operations on a timer
+      or when the buffer fills up.

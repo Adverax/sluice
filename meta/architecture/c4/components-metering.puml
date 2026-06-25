@@ -1,0 +1,76 @@
+@startuml
+'==============================================================================
+' Sluice - LLM Gateway (single Go service)
+' C4 Level 3 - Component Diagram
+' Bounded Context: Metering (CTX-004)
+' Capability: CAP-006 (Usage Metering)
+'------------------------------------------------------------------------------
+' This file draws ONLY the components of CTX-004 (Metering Context).
+' For the full COMP inventory across all contexts, see the overview file:
+'   components-proxy.puml
+'------------------------------------------------------------------------------
+' Architectural decisions reflected below:
+'   ADR-0007 : Proxy -> Metering via BUFFERED Go channel, NON-BLOCKING,
+'              drop-on-full + counter (metering_events_dropped_total).
+'              Background worker batches + timer-flushes to Postgres;
+'              final flush on graceful shutdown. Hot path is NEVER blocked (INV-003).
+'   ADR-0005 : UsageBuffer capacity = 1000.
+'   ADR-0010 : MeteringRepository is the ACL over pgx/v5 to Postgres (EXT-003),
+'              batch INSERT into usage_events; SQL hidden from UsageRecord (AGG-004).
+'   POL-004  : Worker flushes when batch-size threshold reached OR flush timer
+'              expires (whichever first).
+'   POL-005  : Final flush on graceful shutdown (EVT-011).
+'   INV-007  : Every handled request produces exactly one UsageRecord unless the
+'              buffer is full (then dropped + counter++).
+'   FR-014 / AC-037 : Postgres down at flush -> log error, do not block hot path,
+'              retry or drop with log.
+'==============================================================================
+!include <C4/C4_Component>
+
+title "Components: Metering Context (CTX-004)"
+
+' ---- External producer (lives in CTX-002 Proxy Context) -------------------
+Component_Ext(proxy_core, "Proxy Core", "Go / hot path", "COMP-002 - produces one usage event per handled request (INV-007)")
+
+' ---- External consumer (lives in Observability Context) -------------------
+Component_Ext(metrics_exporter, "Metrics Exporter", "Go / Prometheus", "COMP-013 - exposes metering_events_dropped_total")
+
+' ---- External datastore ---------------------------------------------------
+ContainerDb_Ext(postgres, "Postgres", "PostgreSQL 16", "EXT-003 - usage_events table")
+
+' ---- The Metering Context -------------------------------------------------
+Container_Boundary(metering, "Metering Context") {
+
+    Component(usage_buffer, "Usage Buffer", "Go buffered channel", "COMP-016 (CAP-006) - bounded async hand-off from the hot path to the worker; non-blocking publish, drop-on-full")
+
+    Component(metering_worker, "Metering Worker", "Go background goroutine", "COMP-017 (CAP-006) - drains the buffer, accumulates batches, and flushes on size/timer/shutdown (POL-004, POL-005)")
+
+    Component(metering_repo, "MeteringRepository", "Go / pgx/v5 (ACL)", "COMP-018 (CAP-006) - anti-corruption layer; batch INSERT of UsageRecord (AGG-004) into usage_events; SQL hidden from domain (ADR-0010)")
+}
+
+' ---- Relationships --------------------------------------------------------
+Rel(proxy_core, usage_buffer, "publish usage event, non-blocking, drop-on-full + counter (cap=1000)", "Go chan send")
+Rel(usage_buffer, metering_worker, "drain", "Go chan receive")
+Rel(metering_worker, metering_repo, "batch on size/timer/shutdown", "in-process call (POL-004, POL-005)")
+Rel(metering_repo, postgres, "batch INSERT usage_events (pgx)", "SQL / pgx/v5")
+Rel(metering_worker, metrics_exporter, "metering_events_dropped_total", "metric counter")
+
+' ---- Notes ----------------------------------------------------------------
+note right of usage_buffer
+  ADR-0005: capacity = 1000.
+  INV-003 / INV-007: when full, the
+  event is DROPPED (never blocks the
+  hot path) and the dropped counter
+  is incremented.
+end note
+
+note bottom of metering_worker
+  POL-004: flush when batch-size threshold
+  reached OR flush timer expires (whichever first).
+  POL-005: final flush on graceful shutdown (EVT-011).
+  Timer trigger acts as ACT-003 (Scheduler).
+  FR-014 / AC-037: if Postgres is down at flush ->
+  log error, do not block hot path, retry or drop with log.
+end note
+
+@enduml
