@@ -27,11 +27,13 @@ import (
 	"github.com/adverax/sluice/internal/health"
 	"github.com/adverax/sluice/internal/lifecycle"
 	"github.com/adverax/sluice/internal/logging"
+	"github.com/adverax/sluice/internal/middleware"
 	"github.com/adverax/sluice/internal/pool"
 	"github.com/adverax/sluice/internal/provider"
 	"github.com/adverax/sluice/internal/proxy"
 	"github.com/adverax/sluice/internal/proxy/resilience"
 	"github.com/adverax/sluice/internal/proxy/retry"
+	"github.com/adverax/sluice/internal/ratelimit"
 	"github.com/adverax/sluice/internal/server"
 )
 
@@ -139,10 +141,33 @@ func run() error {
 
 	manager := lifecycle.New(httpServer, logger, cfg.Server.ShutdownTimeout)
 
+	// Rate-limit middleware (COMP-008/COMP-009, FR-004, ADR-0001/ADR-0006/ADR-0010).
+	// The LOCAL per-key token-bucket registry is the fast in-process path; the
+	// DISTRIBUTED RateLimitRepository (the Redis adapter, reusing the same
+	// redisClient as the health checker) enforces the shared cross-instance cap.
+	// On a Redis error the middleware FAILS OPEN to the local limiter (a Redis
+	// blip must not 429/503 the whole fleet — see internal/middleware docs).
+	// The registry is bounded by MaxKeys (GATEWAY_RATELIMIT_MAX_KEYS) with
+	// LRU-style eviction and a periodic idle-sweep; Close stops its goroutine.
+	rlRegistry := ratelimit.NewRegistry(cfg.RateLimit.RPS, cfg.RateLimit.Burst,
+		ratelimit.WithMaxKeys(cfg.RateLimit.MaxKeys),
+	)
+	defer rlRegistry.Close()
+	rlRepo := ratelimit.NewRedisRepository(redisClient)
+	rateLimiter := middleware.NewRateLimiter(
+		rlRegistry, rlRepo, cfg.RateLimit.RPS, cfg.RateLimit.Window, logger,
+	)
+
 	// Composition order (ADR-0006), outermost first: request logging wraps the
-	// in-flight counting middleware, which wraps the generated route handler so
-	// proxy requests are drained on shutdown (FR-012 / NFR-005).
-	handler := logging.Middleware(logger)(manager.CountingMiddleware(appHandler))
+	// rate-limit middleware (which must run BEFORE any work, so a 429 never
+	// reaches the proxy/pool/provider — INV-004), which wraps the in-flight
+	// counting middleware, which wraps the generated route handler so proxy
+	// requests are drained on shutdown (FR-012 / NFR-005).
+	handler := logging.Middleware(logger)(
+		rateLimiter.Middleware(
+			manager.CountingMiddleware(appHandler),
+		),
+	)
 	httpServer.Handler = handler
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

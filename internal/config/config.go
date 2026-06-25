@@ -57,6 +57,21 @@ const (
 	defaultBreakerMinRequests  = 10               // min volume before tripping
 	defaultBreakerFailureRatio = 0.5              // failure ratio that trips
 	defaultBreakerRetryAfter   = 60 * time.Second // Retry-After hint on 503
+
+	// Rate limiting (COMP-008/COMP-009, FR-004) per ADR-0001/ADR-0010. RPS is the
+	// per-key token refill rate; Burst is the bucket capacity (max momentary
+	// concurrency). Defaults are deliberately modest (10 rps / burst 20) so the
+	// gateway is safe out of the box without env tuning.
+	defaultRateLimitRPS   = 10
+	defaultRateLimitBurst = 20
+	// defaultRateLimitWindow is the bucket window for the distributed counter: the
+	// global cap is interpreted as RPS over this window (1s) per ADR-0010.
+	defaultRateLimitWindow = time.Second
+	// defaultRateLimitMaxKeys is the hard cap on distinct API keys held in the
+	// local token-bucket registry. Exceeding this limit evicts the LRU entry
+	// (memory-exhaustion / DoS defence). 100 000 is generous for a single
+	// instance while remaining safe on a default-provisioned host.
+	defaultRateLimitMaxKeys = 100_000
 )
 
 // Server holds the timeouts applied to the inbound *http.Server boundary
@@ -143,15 +158,34 @@ type Breaker struct {
 	RetryAfter time.Duration
 }
 
+// RateLimit holds the per-API-key rate-limit tuning (COMP-008/COMP-009,
+// FR-004) per ADR-0001/ADR-0010. RPS/Burst feed the local golang.org/x/time/rate
+// token buckets; RPS/Window feed the distributed (Redis) global cap.
+type RateLimit struct {
+	// RPS is the per-key refill rate (requests per second).
+	RPS int
+	// Burst is the per-key token-bucket capacity (max momentary burst).
+	Burst int
+	// Window is the bucket window for the distributed counter. The global cap is
+	// RPS requests per Window across all gateway instances sharing one Redis.
+	Window time.Duration
+	// MaxKeys is the hard cap on the number of per-key limiters held in the
+	// local token-bucket registry (GATEWAY_RATELIMIT_MAX_KEYS). When the
+	// registry is at cap the least-recently-used entry is evicted before a new
+	// key is inserted (memory-exhaustion / DoS defence).
+	MaxKeys int
+}
+
 // Config is the fully-resolved service configuration.
 type Config struct {
-	Server   Server
-	Upstream Upstream
-	Redis    Redis
-	Postgres Postgres
-	Logging  Logging
-	Retry    Retry
-	Breaker  Breaker
+	Server    Server
+	Upstream  Upstream
+	Redis     Redis
+	Postgres  Postgres
+	Logging   Logging
+	Retry     Retry
+	Breaker   Breaker
+	RateLimit RateLimit
 
 	// HealthCheckTimeout is the per-check deadline passed to each individual
 	// readiness checker. Keeping it separate from the Redis/Postgres timeouts
@@ -242,6 +276,12 @@ func Load() (*Config, error) {
 			FailureRatio: mustFloat("GATEWAY_BREAKER_FAILURE_RATIO", defaultBreakerFailureRatio),
 			RetryAfter:   mustDuration("GATEWAY_BREAKER_RETRY_AFTER", defaultBreakerRetryAfter),
 		},
+		RateLimit: RateLimit{
+			RPS:     mustPositiveInt("GATEWAY_RATELIMIT_RPS", defaultRateLimitRPS),
+			Burst:   mustPositiveInt("GATEWAY_RATELIMIT_BURST", defaultRateLimitBurst),
+			Window:  mustDuration("GATEWAY_RATELIMIT_WINDOW", defaultRateLimitWindow),
+			MaxKeys: mustPositiveInt("GATEWAY_RATELIMIT_MAX_KEYS", defaultRateLimitMaxKeys),
+		},
 		HealthCheckTimeout: mustDuration("GATEWAY_HEALTH_CHECK_TIMEOUT", defaultHealthCheckTimeout),
 		WorkerPoolSize:     mustPositiveInt("GATEWAY_WORKER_POOL_SIZE", defaultWorkerPoolSize),
 	}
@@ -284,6 +324,7 @@ func (c *Config) Validate() error {
 		{"breaker.Interval", c.Breaker.Interval},
 		{"breaker.Timeout", c.Breaker.Timeout},
 		{"breaker.RetryAfter", c.Breaker.RetryAfter},
+		{"rateLimit.Window", c.RateLimit.Window},
 	}
 	for _, t := range timeouts {
 		if t.value <= 0 {
@@ -308,6 +349,16 @@ func (c *Config) Validate() error {
 	}
 	if c.Breaker.MaxRequests == 0 {
 		return fmt.Errorf("breaker.MaxRequests must be > 0")
+	}
+
+	if c.RateLimit.RPS <= 0 {
+		return fmt.Errorf("rateLimit.RPS must be > 0, got %d", c.RateLimit.RPS)
+	}
+	if c.RateLimit.Burst <= 0 {
+		return fmt.Errorf("rateLimit.Burst must be > 0, got %d", c.RateLimit.Burst)
+	}
+	if c.RateLimit.MaxKeys <= 0 {
+		return fmt.Errorf("rateLimit.MaxKeys must be > 0, got %d", c.RateLimit.MaxKeys)
 	}
 
 	if c.Server.ShutdownTimeout <= 0 {
