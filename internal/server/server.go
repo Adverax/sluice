@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -216,6 +217,29 @@ func (s *Server) CreateChatCompletion(ctx context.Context, request api.CreateCha
 
 	req := toCanonicalRequest(body)
 
+	// Streaming path (FR-001 AC-002, FR-003): when the client requests a stream
+	// we cannot return a buffered response object — we must take over the raw
+	// http.ResponseWriter. The strict server exposes that seam through the
+	// response visitor (CreateChatCompletionResponseObject), so we return a
+	// custom streamResponse whose VisitCreateChatCompletionResponse drives the
+	// SSE forwarding loop. The provider is resolved here (same as unary); the
+	// per-request context is threaded into InferStream inside Visit so client
+	// disconnect/deadline aborts the upstream (AC-008, AC-009, INV-002).
+	//
+	// Resilience-for-streaming (open-breaker fast-fail on initiation, pool slot)
+	// is a documented follow-up: retry cannot apply to a partially-sent
+	// response, and the breaker/pool wrap the unary infer hook only. The unary
+	// path retains full resilience.
+	if req.Stream {
+		return streamResponse{
+			ctx:      ctx,
+			provider: prov,
+			req:      req,
+			logger:   s.logger,
+			model:    body.Model,
+		}, nil
+	}
+
 	resp, err := s.infer(ctx, prov, req)
 	if err != nil {
 		// Fast-fail (open breaker / deadline during retry) → 503 + Retry-After
@@ -341,6 +365,146 @@ func (r serviceUnavailableResponse) VisitCreateChatCompletionResponse(w http.Res
 		w.Header().Set("Retry-After", strconv.Itoa(secs))
 	}
 	return r.body.VisitCreateChatCompletionResponse(w)
+}
+
+// streamResponse is the custom strict-server response for the streaming path
+// (FR-001 AC-002). It implements the generated CreateChatCompletionResponseObject
+// seam: VisitCreateChatCompletionResponse takes over the raw http.ResponseWriter
+// to forward Server-Sent Events, instead of returning a buffered JSON body.
+//
+// ctx is the per-request context (r.Context()) captured in the handler. It is
+// threaded straight into Provider.InferStream so any cancellation — client
+// disconnect or deadline — propagates to the upstream call and aborts it
+// promptly (FR-003, AC-008, AC-009, INV-002). The Mock honours ctx at every
+// emit step and closes its channel, so the consumer never leaks a goroutine.
+type streamResponse struct {
+	ctx      context.Context
+	provider provider.Provider
+	req      provider.Request
+	logger   *slog.Logger
+	model    string
+}
+
+// sseDone is the conventional terminal marker of the chat-completions SSE
+// protocol; clients stop reading when they see it.
+const sseDone = "data: [DONE]\n\n"
+
+// VisitCreateChatCompletionResponse drives the SSE forwarding loop. It writes
+// the streaming headers + 200 status, resolves the provider stream via
+// InferStream(ctx, ...), and forwards each canonical Chunk as an SSE `data:`
+// event, flushing after every write so clients see deltas as they arrive.
+//
+// Flush goes through http.NewResponseController(w).Flush(): the metrics/tracing
+// middleware wrap the ResponseWriter and implement Unwrap() http.ResponseWriter,
+// so the controller traverses the unwrap chain to reach the real flusher — a
+// raw w.(http.Flusher) assertion would fail through those wrappers.
+//
+// The select on ctx.Done() vs the chunk channel guarantees prompt return on
+// client disconnect: when ctx is cancelled we stop forwarding and return, which
+// (because ctx was passed to InferStream) cancels the upstream and lets the
+// provider goroutine drain and close the channel — no goroutine leak.
+func (r streamResponse) VisitCreateChatCompletionResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	rc := http.NewResponseController(w)
+	_ = rc.Flush() // flush headers so the client sees the stream open immediately.
+
+	ch, err := r.provider.InferStream(r.ctx, r.req)
+	if err != nil {
+		// Failure to initialise the stream: headers/200 are already sent, so we
+		// cannot change the status. Emit a terminal marker and log (AC-003 cannot
+		// apply once committed to 200). This mirrors the streaming SSE convention.
+		r.logger.LogAttrs(r.ctx, slog.LevelError, "InferStream initialisation failed",
+			slog.String("model", r.model),
+			slog.String("error", err.Error()),
+		)
+		_, _ = w.Write([]byte(sseDone))
+		_ = rc.Flush()
+		return nil
+	}
+
+	for {
+		select {
+		case <-r.ctx.Done():
+			// Client disconnect / deadline: stop forwarding and return. Returning
+			// keeps ctx cancelled, which aborts the upstream; the provider drains
+			// and closes ch. We do not range the channel further (no leak).
+			r.logger.LogAttrs(r.ctx, slog.LevelDebug, "streaming context cancelled; stopping forward",
+				slog.String("model", r.model),
+				slog.String("error", r.ctx.Err().Error()),
+			)
+			return nil
+		case chunk, ok := <-ch:
+			if !ok {
+				// Channel closed: stream finished normally.
+				_, _ = w.Write([]byte(sseDone))
+				_ = rc.Flush()
+				return nil
+			}
+			if chunk.Err != nil {
+				// Mid-stream transport error: log and end the stream (cannot retry a
+				// partially-sent response).
+				r.logger.LogAttrs(r.ctx, slog.LevelError, "stream chunk error",
+					slog.String("model", r.model),
+					slog.String("error", chunk.Err.Error()),
+				)
+				_, _ = w.Write([]byte(sseDone))
+				_ = rc.Flush()
+				return nil
+			}
+			if chunk.Done {
+				// Terminal success chunk: emit any usage-bearing event then [DONE].
+				payload, mErr := json.Marshal(toAPIChunk(chunk))
+				if mErr == nil {
+					_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+					_ = rc.Flush()
+				}
+				_, _ = w.Write([]byte(sseDone))
+				_ = rc.Flush()
+				return nil
+			}
+			// Content delta: forward as an SSE data event and flush so the client
+			// receives it as it arrives (AC-002).
+			payload, mErr := json.Marshal(toAPIChunk(chunk))
+			if mErr != nil {
+				r.logger.LogAttrs(r.ctx, slog.LevelError, "marshal stream chunk",
+					slog.String("model", r.model),
+					slog.String("error", mErr.Error()),
+				)
+				continue
+			}
+			if _, wErr := fmt.Fprintf(w, "data: %s\n\n", payload); wErr != nil {
+				// Write failure usually means the client went away; stop forwarding.
+				return nil
+			}
+			_ = rc.Flush()
+		}
+	}
+}
+
+// streamChunk is the wire shape of one SSE data event on the streaming path. It
+// keeps the canonical Chunk fields (content + usage) crossing the boundary as
+// provider-agnostic JSON (ADR-0009); no provider-specific type is exposed.
+type streamChunk struct {
+	Content string    `json:"content,omitempty"`
+	Done    bool      `json:"done,omitempty"`
+	Usage   api.Usage `json:"usage,omitempty"`
+}
+
+// toAPIChunk maps a canonical provider.Chunk onto the SSE wire shape.
+func toAPIChunk(c provider.Chunk) streamChunk {
+	return streamChunk{
+		Content: c.Content,
+		Done:    c.Done,
+		Usage: api.Usage{
+			PromptTokens:     c.Usage.PromptTokens,
+			CompletionTokens: c.Usage.CompletionTokens,
+			TotalTokens:      c.Usage.TotalTokens,
+		},
+	}
 }
 
 // Handler builds the http.Handler for the gateway: it wraps this Server in the

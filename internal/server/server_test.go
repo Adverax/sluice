@@ -8,8 +8,11 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/adverax/sluice/internal/api"
 	"github.com/adverax/sluice/internal/health"
@@ -240,6 +243,221 @@ func TestProxy_EmptyMessages_Returns400(t *testing.T) {
 	if spy.called {
 		t.Error("provider.Infer must not be called when messages is empty")
 	}
+}
+
+// --- Streaming path (FR-001 AC-002, FR-003 AC-008/AC-009) ------------------
+
+// streamSpy is a streaming Provider test double whose chunk emission is gated by
+// the test. It records when its background goroutine stops (so leak/abort can be
+// asserted) and honours ctx at every step.
+type streamSpy struct {
+	chunks   []provider.Chunk // content chunks to emit before the terminal Done chunk
+	perChunk time.Duration    // delay before each emit, honoured against ctx
+	started  atomic.Bool
+	stopped  atomic.Bool           // set when the goroutine returns
+	ctxErr   atomic.Pointer[error] // the ctx error observed when aborting (if any)
+}
+
+func (s *streamSpy) Infer(context.Context, provider.Request) (provider.Response, error) {
+	return provider.Response{}, errors.New("unary not used in streaming test")
+}
+
+func (s *streamSpy) InferStream(ctx context.Context, _ provider.Request) (<-chan provider.Chunk, error) {
+	s.started.Store(true)
+	out := make(chan provider.Chunk)
+	go func() {
+		defer close(out)
+		defer s.stopped.Store(true)
+		for _, c := range s.chunks {
+			if s.perChunk > 0 {
+				t := time.NewTimer(s.perChunk)
+				select {
+				case <-ctx.Done():
+					t.Stop()
+					err := ctx.Err()
+					s.ctxErr.Store(&err)
+					return
+				case <-t.C:
+				}
+			}
+			select {
+			case out <- c:
+			case <-ctx.Done():
+				err := ctx.Err()
+				s.ctxErr.Store(&err)
+				return
+			}
+		}
+		select {
+		case out <- provider.Chunk{Done: true, Usage: provider.Usage{TotalTokens: 7}}:
+		case <-ctx.Done():
+			err := ctx.Err()
+			s.ctxErr.Store(&err)
+		}
+	}()
+	return out, nil
+}
+
+func countDataEvents(body string) int {
+	n := 0
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "data: ") && !strings.HasPrefix(line, "data: [DONE]") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestProxy_HappyPath_Streaming covers AC-002: stream:true returns 200 with
+// Content-Type text/event-stream and forwards the SSE deltas as they arrive.
+func TestProxy_HappyPath_Streaming(t *testing.T) {
+	mock := provider.New(
+		provider.WithResponse(provider.Response{
+			Model:   "gpt-4",
+			Content: "hello streaming world",
+			Usage:   provider.Usage{TotalTokens: 7},
+		}),
+		provider.WithStreamChunks(3),
+	)
+	router := proxy.NewRouter()
+	router.Register("gpt-4", mock)
+	h := newTestServer(t, router)
+
+	rec := doJSON(t, h, `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+	}
+	body := rec.Body.String()
+	if got := countDataEvents(body); got < 2 {
+		t.Errorf("forwarded %d SSE data events, want >= 2 (body=%q)", got, body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Errorf("expected terminal [DONE] marker, body=%q", body)
+	}
+}
+
+// TestProxy_ClientCancel_AbortsUpstream covers AC-008: a request is in flight
+// with high upstream latency; the client cancels and the ctx passed to
+// InferStream is cancelled, so the handler returns promptly and the provider
+// stream goroutine stops (no leak).
+func TestProxy_ClientCancel_AbortsUpstream(t *testing.T) {
+	spy := &streamSpy{
+		chunks:   []provider.Chunk{{Content: "a"}, {Content: "b"}, {Content: "c"}},
+		perChunk: 500 * time.Millisecond,
+	}
+	router := proxy.NewRouter()
+	router.Register("gpt-4", spy)
+	h := newTestServer(t, router)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"stream":true}`)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	// Cancel ~100ms in, while the first 500ms chunk is still pending.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(150 * time.Millisecond):
+		t.Fatal("handler did not return promptly after client cancel")
+	}
+
+	// The provider stream goroutine must have observed cancellation and stopped.
+	waitTrue(t, &spy.stopped, 200*time.Millisecond, "provider stream goroutine did not stop")
+	if e := spy.ctxErr.Load(); e == nil || !errors.Is(*e, context.Canceled) {
+		t.Errorf("upstream ctx error = %v, want context.Canceled", e)
+	}
+}
+
+// TestProxy_StreamingClientCancel_AbortsUpstream covers AC-009: during an active
+// SSE stream the client closes; the gateway stops forwarding and the upstream is
+// cancelled, with no goroutine leak.
+func TestProxy_StreamingClientCancel_AbortsUpstream(t *testing.T) {
+	before := runtime.NumGoroutine()
+
+	spy := &streamSpy{
+		// Many chunks with a small per-chunk delay so the stream is genuinely
+		// active (already forwarding) when the client cancels mid-stream.
+		chunks:   make([]provider.Chunk, 50),
+		perChunk: 20 * time.Millisecond,
+	}
+	for i := range spy.chunks {
+		spy.chunks[i] = provider.Chunk{Content: "x"}
+	}
+	router := proxy.NewRouter()
+	router.Register("gpt-4", spy)
+	h := newTestServer(t, router)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"stream":true}`)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	// Let several chunks flow, then close the connection mid-stream.
+	time.Sleep(60 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(150 * time.Millisecond):
+		t.Fatal("handler did not stop forwarding promptly after mid-stream cancel")
+	}
+
+	waitTrue(t, &spy.stopped, 200*time.Millisecond, "provider stream goroutine leaked after cancel")
+	if e := spy.ctxErr.Load(); e == nil || !errors.Is(*e, context.Canceled) {
+		t.Errorf("upstream ctx error = %v, want context.Canceled", e)
+	}
+
+	// No goroutine leak: allow the scheduler a moment to reclaim, then compare
+	// with a tolerance for test-harness background goroutines.
+	waitGoroutines(t, before+2, 500*time.Millisecond)
+}
+
+// waitTrue polls an atomic.Bool until it is true or the deadline elapses.
+func waitTrue(t *testing.T, b *atomic.Bool, timeout time.Duration, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if b.Load() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal(msg)
+}
+
+// waitGoroutines polls until the goroutine count drops to <= limit or times out.
+func waitGoroutines(t *testing.T, limit int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		runtime.GC()
+		if runtime.NumGoroutine() <= limit {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Errorf("goroutine count = %d, want <= %d (possible leak)", runtime.NumGoroutine(), limit)
 }
 
 // --- Health & readiness (FR-008/FR-009) -----------------------------------

@@ -63,4 +63,56 @@ ADR-0009: streaming path uses `Provider.InferStream` through the same interface;
 
 ## Worktree notes
 
-—
+### CARD-004 implementation (card/004-sse-streaming)
+
+**Streaming wiring (Visit seam).** `CreateChatCompletion` reuses the unary
+validate→route→map pipeline, then branches on `req.Stream`. For a stream it
+returns a custom `streamResponse` strict-response object (instead of a buffered
+`CreateChatCompletion200JSONResponse`). Its
+`VisitCreateChatCompletionResponse(w http.ResponseWriter)` — the same generated
+response-visitor seam CARD-009 used for `/metrics` — takes over the raw writer:
+sets `Content-Type: text/event-stream`, `Cache-Control: no-cache`,
+`Connection: keep-alive`, writes 200, then forwards each canonical `Chunk` as an
+SSE `data: <json>\n\n` event and ends with `data: [DONE]`. Chunks are marshalled
+to a provider-agnostic `streamChunk` wire shape (content + canonical usage) — no
+provider type crosses the boundary (ADR-0009).
+
+**Flush through the Unwrap chain.** Flushing uses
+`http.NewResponseController(w).Flush()` after each write (headers + every event),
+NOT a raw `w.(http.Flusher)` assertion — the metrics/tracing ResponseWriter
+wrappers implement `Unwrap() http.ResponseWriter`, and the controller traverses
+that chain to reach the real flusher.
+
+**Ctx cancellation aborts upstream (no leak).** The per-request context
+(`r.Context()`, received by the handler as `ctx`) is captured in `streamResponse`
+and passed straight into `provider.InferStream(ctx, req)`. The Visit loop
+`select`s on `ctx.Done()` vs the chunk channel; on client disconnect/deadline it
+stops forwarding and returns. Because that same ctx was handed to InferStream,
+returning cancels the upstream, so the Mock's emit goroutine observes
+`ctx.Done()`, stops, and closes its channel — proven by
+`TestProxy_StreamingClientCancel_AbortsUpstream` (NumGoroutine before/after with
+tolerance + a `stopped` atomic signal from the stream double) and
+`TestProxy_ClientCancel_AbortsUpstream` (asserts the goroutine stopped and the
+observed upstream ctx error is `context.Canceled`).
+
+**AC → test mapping.**
+- AC-002 → `TestProxy_HappyPath_Streaming` (200, text/event-stream, ≥2 `data:`
+  events, terminal `[DONE]`).
+- AC-008 → `TestProxy_ClientCancel_AbortsUpstream` (500ms latency, cancel ~100ms
+  in, handler returns <150ms, upstream ctx == context.Canceled).
+- AC-009 → `TestProxy_StreamingClientCancel_AbortsUpstream` (active stream,
+  mid-stream cancel, forwarding stops, no goroutine leak).
+Existing unary tests stay green (streaming is an added branch).
+
+**FOLLOW-UP — resilience for streaming (deferred, not an AC).** The streaming
+initiation calls the router-resolved provider's `InferStream` directly; it is NOT
+guarded by the circuit breaker (open-breaker fast-fail before stream start) nor
+does it take a pool slot. Retry is intentionally N/A for a stream (cannot retry a
+partially-sent response). The UNARY path retains full resilience
+(pool→retry→breaker→Infer via the injected InferFunc). Wiring breaker-guard on
+stream initiation + pool slot acquisition for the streaming path is a documented
+follow-up.
+
+**Validation.** `go build ./...`, `go vet ./...`, `go test -race ./...` all green;
+`go generate ./...` diff-clean (no change to internal/api/api.gen.go or
+api/openapi.yaml); `go mod tidy` no-op.
