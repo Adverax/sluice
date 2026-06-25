@@ -1,0 +1,74 @@
+# CI gate for sluice (CON-004). Mandatory for every PR and push to main: build,
+# the race-detector test suite, and golangci-lint. A separate integration job
+# spins up real Postgres + Redis (via testcontainers, which uses the runner's
+# Docker daemon) and runs the //go:build integration suite.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25"
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: go build
+        run: go build ./...
+      - name: go generate is diff-clean (ADR-0011)
+        run: |
+          go generate ./...
+          git diff --exit-code || { echo "::error::go generate produced a diff; commit the regenerated code"; exit 1; }
+
+  test:
+    name: unit + race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: go test -race
+        run: go test -race ./...
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.64.8
+
+  integration:
+    name: integration (testcontainers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      # ubuntu-latest runners ship a working Docker daemon, which testcontainers
+      # uses to spin up real Postgres + Redis. -p 1 serialises packages so the
+      # containers don't contend.
+      - name: go test -tags=integration -race -p 1
+        run: go test -tags=integration -race -p 1 -timeout 15m ./...

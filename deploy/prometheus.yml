@@ -1,0 +1,14 @@
+# Prometheus scrape config for the `make up` stack (CON-005, CARD-011).
+# Scrapes the gateway's /metrics endpoint (COMP-013) so the six+ required
+# metrics (NFR-007/AC-048) are visible in Grafana.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: sluice-gateway
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["gateway:8080"]
+        labels:
+          service: sluice

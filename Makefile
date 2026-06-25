@@ -65,3 +65,40 @@ clean: ## Remove build/test artifacts
 	go clean ./...
 	rm -rf bin/
 # <<< forge:harness (managed) <<<
+
+# --- CARD-011 full-stack + load + integration (CON-005) ---------------------
+# Hand-written targets BELOW the managed block. Make uses the LAST definition of
+# a target, so these OVERRIDE the managed `up`/`down` to bring up the FULL stack
+# (gateway + postgres + redis + prometheus + grafana) by layering
+# deploy/docker-compose.stack.yml on top of the managed deploy/docker-compose.yml
+# — the managed region itself is never edited.
+.PHONY: up down test-integration load migrate stack-logs
+
+STACK_OVERLAY := deploy/docker-compose.stack.yml
+COMPOSE_FILES := -f $(COMPOSE) -f $(STACK_OVERLAY)
+LOAD_SCENARIO ?= load/scenario.js
+LOAD_TARGET   ?= http://localhost:8080
+
+up: ## Bring up the FULL stack: gateway + postgres + redis + prometheus + grafana (CON-005)
+	docker compose $(COMPOSE_FILES) up -d --build
+	@echo "gateway    -> http://localhost:8080"
+	@echo "metrics    -> http://localhost:8080/metrics"
+	@echo "prometheus -> http://localhost:9090"
+	@echo "grafana    -> http://localhost:3000 (anonymous admin)"
+
+down: ## Tear down the full stack and its volumes
+	docker compose $(COMPOSE_FILES) down -v
+
+stack-logs: ## Tail the full-stack logs
+	docker compose $(COMPOSE_FILES) logs -f
+
+migrate: ## Apply SQL migrations against the running postgres
+	docker compose $(COMPOSE_FILES) run --rm migrate
+
+test-integration: ## Run the testcontainers integration suite with the race detector (AC-049)
+	go test -tags=integration -race -p 1 ./...
+
+load: ## Run the k6 load scenario against the running stack (LOAD_TARGET=$(LOAD_TARGET))
+	@command -v k6 >/dev/null 2>&1 \
+		|| { echo "k6 not installed — see https://k6.io/docs/get-started/installation/"; exit 1; }
+	k6 run -e BASE_URL=$(LOAD_TARGET) $(LOAD_SCENARIO)
