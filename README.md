@@ -43,6 +43,8 @@ recover → logging → tracing → metrics → rate-limit → in-flight count �
 
 ## Quickstart
 
+### Five-minute demo (full stack)
+
 Bring up the full stack (gateway + Postgres + Redis + Prometheus + Grafana):
 
 ```sh
@@ -57,6 +59,20 @@ make up
 distroless final image), applies [`migrations/`](migrations/) via a one-shot
 `migrate` step, and wires Prometheus to scrape `/metrics` and Grafana to
 provision the dashboard automatically.
+
+### Dev loop (host-run gateway)
+
+For iterative development, use `make run` — it starts only Postgres + Redis
+(no dockerised gateway), then runs the gateway as a host process:
+
+```sh
+make run
+# postgres + redis come up first, then:
+# go run ./cmd/gateway   (host process on :8080 — no port conflict)
+```
+
+Use `make down` to tear down the full demo stack, or `make infra-down` to stop
+the infra-only containers started by `make run`.
 
 ### Non-streaming completion
 
@@ -130,7 +146,9 @@ Each pattern maps to the package/file that implements it:
 | `make test` | `go test -race ./...` (unit suite, race detector) |
 | `make test-integration` | `go test -tags=integration -race -p 1 ./...` — real Postgres + Redis via testcontainers |
 | `make lint` | `go vet` + `golangci-lint run` (staticcheck, errcheck, govet, …) |
-| `make up` / `make down` | Full stack up/down |
+| `make up` / `make down` | Full demo stack up/down (gateway + postgres + redis + prometheus + grafana) |
+| `make run` | Host dev loop: starts postgres + redis only (`make infra`), then `go run ./cmd/gateway` — no dockerised gateway, no `:8080` conflict |
+| `make infra` / `make infra-down` | Start/stop local backing infra only (postgres + redis), without the gateway container |
 | `make load` | Run the k6 load scenario ([`load/scenario.js`](load/scenario.js)) against the running stack |
 | `make generate` | Regenerate the OpenAPI boundary (must stay diff-clean) |
 

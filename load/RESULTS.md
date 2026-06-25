@@ -59,12 +59,15 @@ normal `go test`).
 > measurements. To populate:
 >
 > ```sh
-> make up                                   # full stack on :8080 / :9090 / :3000
+> make up            # full demo stack: gateway + postgres + redis + prometheus + grafana
 > # wait for the gateway to be ready:
 > curl -fsS http://localhost:8080/readyz
-> make load                                 # runs load/scenario.js via k6
+> make load          # runs load/scenario.js via k6 against http://localhost:8080
 > # or: k6 run -e BASE_URL=http://localhost:8080 load/scenario.js
 > ```
+>
+> Note: use `make up` (full stack with the dockerised gateway on :8080), NOT
+> `make run` (host dev loop — no load test should target a dev process).
 >
 > Then copy k6's end-of-run summary (`http_req_duration` percentiles + the
 > per-status counts) into the table below and record the environment.

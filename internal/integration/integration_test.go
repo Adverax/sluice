@@ -28,6 +28,7 @@ package integration
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,11 +52,35 @@ func requireDocker(t *testing.T) {
 	}
 }
 
-// isUnavailable reports whether err indicates Docker/the image could not be
+// isUnavailable reports whether err indicates Docker or the image could not be
 // obtained, so a test can skip-with-log instead of failing on infra absence.
+// It covers the common failure modes beyond a plain DeadlineExceeded:
+//   - context deadline / cancellation (container start timed out)
+//   - Docker daemon not running ("Cannot connect to the Docker daemon")
+//   - image-pull / registry errors ("pull access denied", "manifest unknown")
+//   - generic container-creation errors from testcontainers
 func isUnavailable(err error) bool {
 	if err == nil {
 		return false
 	}
-	return errors.Is(err, context.DeadlineExceeded)
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, fragment := range []string{
+		"cannot connect to the docker daemon",
+		"docker daemon",
+		"no such host",
+		"pull access denied",
+		"manifest unknown",
+		"manifest not found",
+		"failed to start container",
+		"failed to create container",
+		"connection refused",
+	} {
+		if strings.Contains(msg, fragment) {
+			return true
+		}
+	}
+	return false
 }
