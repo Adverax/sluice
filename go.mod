@@ -8,6 +8,7 @@ require (
 	github.com/oapi-codegen/oapi-codegen/v2 v2.7.1
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/sony/gobreaker v1.0.0
+	golang.org/x/time v0.15.0
 )
 
 require (

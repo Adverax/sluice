@@ -73,4 +73,77 @@ ADR-0001: ephemeral_assigned_key — keyless requests get a fresh per-key bucket
 
 ## Worktree notes
 
-—
+### Implementation summary
+
+Per-API-key rate limiting implemented as a two-tier net/http middleware
+(COMP-008) + a distributed repository port (COMP-009).
+
+**Files added/changed:**
+- `internal/ratelimit/ratelimit.go` — `RateLimitRepository` port (the ACL,
+  ADR-0010), per-key LOCAL token-bucket `Registry` over `golang.org/x/time/rate`
+  (injectable clock for deterministic tests via `ReserveN`/`DelayFrom`/`CancelAt`).
+- `internal/ratelimit/memrepo.go` — `MemoryRepository`: in-memory fixed-window
+  global counter; used as the SHARED store in the AC-013 test (and a safe
+  single-instance default).
+- `internal/ratelimit/redisrepo.go` — `RedisRepository`: go-redis/v9 adapter
+  enforcing an ATOMIC fixed-window cap via a Lua INCR+PEXPIRE+PTTL script
+  (`redis.Scripter`, so *redis.Client/Ring/Cluster all satisfy it).
+- `internal/middleware/ratelimit.go` — the `RateLimiter` middleware.
+- `internal/config/config.go` — `RateLimit{RPS,Burst,Window}` (env
+  `GATEWAY_RATELIMIT_RPS` default 10, `GATEWAY_RATELIMIT_BURST` default 20,
+  `GATEWAY_RATELIMIT_WINDOW` default 1s), fail-loud validation.
+- `cmd/gateway/main.go` — wiring (see chain below); reuses the existing
+  `*redis.Client`.
+- Tests: `internal/middleware/ratelimit_test.go`,
+  `internal/ratelimit/ratelimit_test.go`, `internal/ratelimit/redisrepo_test.go`.
+
+**Middleware chain position (ADR-0006), outermost first:**
+`logging → rate-limit → counting → generated routes(+OpenAPI validation)`.
+The rate-limit middleware is OUTERMOST of the request work: a 429 is returned
+before the counting middleware / proxy / worker-pool / provider run (INV-004).
+
+**How the two tiers work:** a request must pass BOTH tiers. Tier 1 is the LOCAL
+per-key token bucket (fast, no network) bounding per-instance burst. Tier 2 is
+the DISTRIBUTED `RateLimitRepository` (atomic Redis fixed-window) enforcing one
+GLOBAL cap shared across all instances pointing at the same Redis (AC-013). The
+middleware depends only on the port, never on go-redis directly.
+
+### AC-012 ephemeral-key decision (ADR-0001)
+
+Chosen strategy: **ephemeral_assigned_key** (NOT 401, NOT a single shared
+anonymous bucket). When `Authorization` is absent the middleware mints a
+crypto/rand ephemeral key (`eph_<hex>`, never math/rand), creates a fresh
+per-key bucket, advertises the key on the response via BOTH the
+`X-Sluice-Api-Key` header AND a `Set-Cookie` (`sluice_api_key=...; HttpOnly`),
+and rate-limits the request under that minted key. The header/cookie are set
+even on a 429 so the client always learns the key to reuse. This is how AC-012
+"handled gracefully" is satisfied and gives every anonymous client an isolated
+bucket (no noisy-neighbour). Eviction of idle per-key buckets is a documented
+follow-up (deferred per ADR-0001 "Negative") — v1 does not evict.
+
+### Redis fail-open vs fail-closed (resilience)
+
+**Chosen: FAIL-OPEN.** If the distributed repository returns an error (e.g.
+Redis unreachable), the middleware logs a WARN and falls back to the LOCAL
+limiter verdict rather than rejecting. Rationale: a proxy's job is availability;
+fail-closed would amplify a Redis blip into a fleet-wide outage. The local
+token bucket still bounds per-instance burst during the degradation.
+
+### Notes
+
+- The real go-redis adapter is unit-tested here against a fake `redis.Scripter`
+  (reply parsing + fail-open error path); a LIVE Redis is integration-tested in
+  CARD-011 via testcontainers — not required in this unit suite.
+- `go build ./...` + `go test -race ./...` green; `go generate ./...`
+  diff-clean (internal/api & api/openapi.yaml untouched); `go mod tidy` run
+  (golang.org/x/time added as a direct dependency).
+
+### AC → test mapping
+
+| AC | Test |
+|----|------|
+| AC-010 | `TestRateLimit_ExceedLimit_Returns429WithRetryAfter` (spy asserts provider NOT called on 429) |
+| AC-011 | `TestRateLimit_WithinLimit_Passes` |
+| AC-012 | `TestRateLimit_MissingApiKey_HandledGracefully` (X-Sluice-Api-Key + HttpOnly Set-Cookie + fresh bucket) |
+| AC-013 | `TestRateLimit_DistributedRedis_GlobalLimit` (shared MemoryRepository, two middleware instances, 60+60 → exactly 100 pass) |
+| fail-open | `TestRateLimit_DistributedFailOpen` |
