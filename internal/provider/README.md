@@ -40,6 +40,36 @@ selects on `ctx.Done()` at every send and closes the channel via `defer` (no gor
 Real adapters (OpenAI, Anthropic) are deferred; they will implement `Provider` and
 translate wire-format ↔ canonical types here.
 
+## HTTPProvider (CARD-013)
+
+`HTTPProvider` is the production wiring of the ACL: a `Provider` that reaches a mock LLM
+upstream over **real HTTP** through an **injected** `*http.Client`, so the tuned client's
+connection pooling (ADR-0010, NFR-004) is genuinely exercised rather than discarded.
+
+- `NewHTTP(client *http.Client, baseURL string)` — the client is injected (no package
+  transport); pooling + the explicit total timeout are owned by `cmd/gateway`.
+- `Infer` POSTs canonical-mapped JSON to `/v1/chat/completions`, maps the upstream JSON
+  response → canonical `Response` (incl. `Usage`).
+- `InferStream` requests the SSE variant and reads the `text/event-stream` body
+  incrementally, emitting one canonical `Chunk` per `data:` event and a terminal `Done`
+  chunk with `Usage`; the reader goroutine selects on `ctx.Done()` and closes the body +
+  channel on exit (no leak).
+- Every call builds its request with `http.NewRequestWithContext`, so a cancelled ctx
+  aborts the in-flight upstream call and surfaces a ctx-wrapping error (FR-003).
+- Non-2xx upstream statuses become `*StatusError` (5xx retryable, 4xx not), keeping the
+  resilience layer provider-agnostic.
+
+The upstream wire types (`wireRequest`/`wireResponse`/`wireStreamEvent`) are deliberately
+distinct from the canonical types and never cross the `Provider` boundary (ADR-0009).
+
+## Mock upstream (CARD-013)
+
+`MockUpstreamHandler(MockUpstreamOptions)` returns an `http.Handler` implementing the mock
+upstream wire API consumed by `HTTPProvider`. It is the reproducible mock served over real
+HTTP — usable in tests (`httptest.NewServer`) and run in-process by `cmd/gateway` on a
+loopback side-listener when `GATEWAY_UPSTREAM_URL` is unset. Controllable `Latency`,
+`FailStatus` (error-rate), and `StreamChunks`; serves both the JSON and SSE paths.
+
 ## See also
 
 - `internal/proxy/retry` — uses `StatusError.Retryable()` for retry classification

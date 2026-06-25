@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -89,20 +90,27 @@ func run() error {
 	}()
 
 	// Reused upstream HTTP client with a tuned Transport and an explicit total
-	// timeout from config (ADR-0010, NFR-004). Real provider adapters (later
-	// cards) share this client; constructing it here keeps connection pooling
-	// process-wide rather than per-request.
+	// timeout from config (ADR-0010, NFR-004). The HTTPProvider below shares this
+	// client, so connection pooling (MaxIdleConns etc.) is process-wide rather
+	// than per-request — and is now genuinely EXERCISED rather than discarded.
 	httpClient := newUpstreamClient(cfg.Upstream.Timeout)
-	_ = httpClient // handed to real adapters in later cards; built now per ADR-0010.
 
-	// Model router (FR-002). Real provider adapters land in later cards; until
-	// then a Mock provider keeps the proxy path exercisable end-to-end.
+	// Resolve the mock LLM upstream URL (CARD-013). If GATEWAY_UPSTREAM_URL is set
+	// we point the provider at that external endpoint; otherwise we start an
+	// in-process mock upstream on a loopback side-listener and target it. Either
+	// way the gateway reaches the upstream over REAL HTTP through the pooled
+	// client, so pooling + real ctx-cancellation are exercised end-to-end. This
+	// is still a MOCK upstream (no real OpenAI/Anthropic — a v1 non-goal).
+	upstreamURL, stopMockUpstream, err := resolveUpstream(cfg.Upstream, logger)
+	if err != nil {
+		return err
+	}
+
+	// Model router (FR-002). The "mock" model is served by the HTTPProvider over
+	// real HTTP (CARD-013); the in-process provider.Mock remains for fast unit
+	// tests elsewhere but is no longer on the RUNNING gateway's path.
 	router := proxy.NewRouter()
-	router.Register("mock", provider.New(provider.WithResponse(provider.Response{
-		Model:        "mock",
-		Content:      "this is a mock completion",
-		FinishReason: "stop",
-	})))
+	router.Register("mock", provider.NewHTTP(httpClient, upstreamURL))
 	// Seed breaker_state{provider} to closed (0) at registration so the series
 	// is always present in GET /metrics, even for a provider that has never
 	// tripped its breaker (AC-048: all six metrics must emit on startup).
@@ -218,6 +226,12 @@ func run() error {
 	// (AC-032 / FR-012). The hook runs with its own fresh-deadline context.
 	manager.OnShutdown(meteringWorker.Close)
 
+	// Stop the in-process mock upstream (if started) on graceful shutdown, after
+	// the HTTP drain so no in-flight inference is still calling it (CARD-013).
+	if stopMockUpstream != nil {
+		manager.OnShutdown(stopMockUpstream)
+	}
+
 	// Rate-limit middleware (COMP-008/COMP-009, FR-004, ADR-0001/ADR-0006/ADR-0010).
 	// The LOCAL per-key token-bucket registry is the fast in-process path; the
 	// DISTRIBUTED RateLimitRepository (the Redis adapter, reusing the same
@@ -296,6 +310,43 @@ func breakerStateValue(s gobreaker.State) float64 {
 	default:
 		return metrics.BreakerStateClosed
 	}
+}
+
+// resolveUpstream decides the mock LLM upstream URL the HTTPProvider targets
+// (CARD-013). When cfg.URL is set it is returned verbatim with a nil stop
+// function (the upstream is external — the gateway owns nothing to shut down).
+// When cfg.URL is empty it starts an in-process mock upstream on a loopback
+// side-listener (cfg.MockUpstreamAddr, default 127.0.0.1:0), returns the
+// resolved http://host:port URL, and a stop function that gracefully shuts the
+// side-server down (wired as a lifecycle OnShutdown hook).
+func resolveUpstream(cfg config.Upstream, logger *slog.Logger) (string, func(context.Context) error, error) {
+	if cfg.URL != "" {
+		logger.Info("using external mock upstream", slog.String("url", cfg.URL))
+		return cfg.URL, nil, nil
+	}
+
+	ln, err := net.Listen("tcp", cfg.MockUpstreamAddr)
+	if err != nil {
+		return "", nil, fmt.Errorf("mock upstream listen on %q: %w", cfg.MockUpstreamAddr, err)
+	}
+
+	mockServer := &http.Server{
+		Handler:           provider.MockUpstreamHandler(provider.MockUpstreamOptions{}),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		if serveErr := mockServer.Serve(ln); serveErr != nil && serveErr != http.ErrServerClosed {
+			logger.Error("mock upstream server failed", slog.String("error", serveErr.Error()))
+		}
+	}()
+
+	url := "http://" + ln.Addr().String()
+	logger.Info("started in-process mock upstream", slog.String("addr", ln.Addr().String()), slog.String("url", url))
+
+	stop := func(ctx context.Context) error {
+		return mockServer.Shutdown(ctx)
+	}
+	return url, stop, nil
 }
 
 // newUpstreamClient builds the reused outbound HTTP client for provider calls
