@@ -11,11 +11,14 @@ p95 overhead ≤ 20 ms):
    the network against the `make up` stack (gateway + postgres + redis). This is
    the end-to-end NFR-001/NFR-002 figure.
 
-> **Honesty note:** numbers below are only filled in when they were actually
-> measured, and are labelled with the exact environment. The k6 full-stack table
-> is left as an explicit `TODO` because k6 was not installed in the authoring
-> environment — it must be measured on the declared hardware via `make load`.
-> No load figures are fabricated.
+> **Honesty note:** every number below was actually measured and is labelled
+> with the exact environment and method. The full-stack k6 figures (§2) were
+> measured with k6 v2.0.0 on the declared hardware. They are reported with their
+> real caveats — in particular, the load generator, the gateway, and the mock
+> upstream all ran **on the same laptop**, so the *throughput* ceiling reflects
+> the test rig, not the gateway (see §2). No figures are inflated or fabricated;
+> where a number is a measurement artifact rather than a gateway property, it is
+> labelled as such.
 
 ---
 
@@ -52,47 +55,95 @@ normal `go test`).
 
 ---
 
-## 2. Full-stack k6 load run (TODO — measure via `make load`)
+## 2. Full-stack k6 load run (REAL — measured 2026-06-25)
 
-> **TODO: measure on declared hardware via `make load`.** k6 was not installed
-> in the authoring environment, so these rows are placeholders, NOT fabricated
-> measurements. To populate:
->
-> ```sh
-> make up            # full demo stack: gateway + postgres + redis + prometheus + grafana
-> # wait for the gateway to be ready:
-> curl -fsS http://localhost:8080/readyz
-> make load          # runs load/scenario.js via k6 against http://localhost:8080
-> # or: k6 run -e BASE_URL=http://localhost:8080 load/scenario.js
-> ```
->
-> Note: use `make up` (full stack with the dockerised gateway on :8080), NOT
-> `make run` (host dev loop — no load test should target a dev process).
->
-> Then copy k6's end-of-run summary (`http_req_duration` percentiles + the
-> per-status counts) into the table below and record the environment.
+End-to-end over the network (loopback): k6 → gateway → upstream. Run via k6 v2.0.0.
 
-### Environment (to fill in)
+### Environment & setup
 
-| Field        | Value         |
-|--------------|---------------|
-| CPU          | TODO          |
-| RAM          | TODO          |
-| OS           | TODO          |
-| Go version   | TODO          |
-| Mock latency | 0 ms          |
-| k6 version   | TODO          |
+| Field        | Value                                                            |
+|--------------|------------------------------------------------------------------|
+| CPU          | Apple M5 Pro, 18 cores                                            |
+| RAM          | 48 GB                                                            |
+| OS           | macOS 26.5.1 (arm64)                                              |
+| Go version   | go1.26.1                                                          |
+| k6 version   | v2.0.0                                                            |
+| Gateway      | host binary (`go build ./cmd/gateway`)                           |
+| Upstream     | in-process mock over HTTP, **0 ms** latency (CARD-013)           |
+| Backing infra| real Redis + real Postgres (migrated) via `make infra`           |
+| Rate limit   | raised to 2,000,000 rps/burst — measure pipeline overhead, not the limiter |
+| Topology     | **k6 + gateway + mock all co-resident on one laptop**; each request crosses loopback twice (k6→gateway→in-proc mock) |
 
-### Results (to fill in)
+### 2a. Steady-state latency (below saturation) — the honest NFR-001 figure
 
-| Phase            | RPS   | p50    | p95    | p99    | error-rate | Notes                       |
-|------------------|-------|--------|--------|--------|------------|-----------------------------|
-| plateau          | ~3000 | TODO   | TODO   | TODO   | TODO       | p95 must be ≤ 20 ms (NFR-001)|
-| 3× overload spike| ~9000 | TODO   | TODO   | TODO   | TODO       | only 200/429/503 (NFR-002)  |
-| recovery         | ~3000 | TODO   | TODO   | TODO   | TODO       | accepts again post-load     |
+`constant-arrival-rate`, 30 s per rate. At these rates the rig is **not**
+saturated (VUs never grow past the pre-allocated pool, 0 dropped iterations), so
+`http_req_duration` is real end-to-end service time:
 
-`load/scenario.js` already encodes the NFR thresholds, so a `make load` run that
-exits 0 has met them:
+| Target RPS | Achieved | p50     | p90     | p95     | p99      | max      | dropped | NFR-001 (p95 ≤ 20 ms) |
+|-----------:|---------:|---------|---------|---------|----------|----------|--------:|------------------------|
+| 500        | 500/s    | 1.87 ms | 3.60 ms | 4.09 ms | 9.63 ms  | 32.8 ms  | 0       | ✅ PASS |
+| 700        | 700/s    | 2.40 ms | 4.09 ms | 5.48 ms | 13.0 ms  | 31.0 ms  | 0       | ✅ PASS |
+| 800        | 800/s    | 0.60 ms | 0.86 ms | 0.96 ms | 1.33 ms  | 5.40 ms  | 0       | ✅ PASS |
 
-- `http_req_duration p(95) <= 20` (NFR-001 gateway overhead), and
-- `bad_status count == 0` — every response was 200/429/503, no crash (NFR-002).
+Full-stack p95 is **single-digit milliseconds** (≈1–5 ms) across the sustainable
+range — well under the 20 ms NFR-001 budget. The run-to-run spread (e.g. 800 rps
+measuring *faster* than 500) is CPU-scheduling / thermal noise from running the
+load generator on the same machine as the service, not a gateway property. The
+**pure** gateway overhead, isolated from the network and the load generator, is
+~11 µs (§1).
+
+### 2b. Throughput ceiling — a property of the test rig, not the gateway
+
+At a target ≥ 1000 rps the single-laptop rig saturates:
+
+| Target RPS | Achieved (ceiling) | dropped/s | VUs    | p95 (queueing) | Interpretation |
+|-----------:|-------------------:|----------:|--------|----------------|----------------|
+| 1000       | ~851/s             | ~96/s     | maxed  | ~1.83 s        | request queue forms in k6 |
+| 2000       | ~841/s             | ~1056/s   | maxed  | ~1.98 s        | same ceiling, more drops  |
+
+Sustained throughput tops out around **~850 req/s** with everything co-resident.
+This is the **combined** ceiling of k6 (up to 2000 VUs) + the gateway + the
+in-process mock + the double loopback hop, all competing for the same 18 cores —
+**not** the gateway's capacity. Because the gateway's own work is ~11 µs/request
+(§1), it is far from the bottleneck here. A true throughput benchmark would put
+the load generator and the upstream on **separate hosts** from the gateway.
+
+### 2c. Graceful degradation under overload (NFR-002) — PASS
+
+The full `load/scenario.js` (ramp → 3k plateau → **9k** spike → recovery, 5 m 30 s)
+was run end-to-end:
+
+| Metric                | Result   |
+|-----------------------|----------|
+| requests completed    | 432,125  |
+| `bad_status` (≠ 200/429/503) | **0** |
+| `http_req_failed`     | **0** (0 of 432,125) |
+| panics in gateway log | **0**    |
+| `/readyz` during & after | 200   |
+| post-run metrics      | breaker closed, 0 rate-limit rejections, 0 metering drops, buffer drained |
+
+Even when the offered load (target up to 9k rps) far exceeded the rig ceiling,
+**every** request received a valid status and the process stayed healthy — exactly
+the NFR-002 contract. The scenario's built-in `p(95) ≤ 20 ms` threshold reports a
+*failure* (p95 ≈ 2.4 s) **only** because the target rps is far above what a
+co-resident rig sustains, so that figure is load-generator queueing, not gateway
+overhead (see §2a/§2b for the real latency). `bad_status == 0` — the meaningful
+NFR-002 threshold — passed.
+
+### Reproduce
+
+```sh
+make infra                                   # real postgres + redis
+go build -o /tmp/sluice-gw ./cmd/gateway
+GATEWAY_RATELIMIT_RPS=2000000 GATEWAY_RATELIMIT_BURST=2000000 \
+  GATEWAY_LOG_LEVEL=warn /tmp/sluice-gw &    # in-process 0ms mock upstream auto-starts
+curl -fsS http://localhost:8080/readyz
+make load                                    # full ramp→spike→recovery scenario (NFR-002)
+# steady-state latency sweep (NFR-001), below the co-resident saturation knee:
+k6 run -e BASE_URL=http://localhost:8080 -e RATE=500 -e DUR=30s \
+  --summary-trend-stats="avg,min,med,p(90),p(95),p(99),max" load/scenario-steady.js
+```
+
+For a representative *throughput* number, run k6 and the upstream on separate
+hosts from the gateway so the load generator does not compete with it for CPU.

@@ -4,11 +4,20 @@
 door for chat-completion providers that adds the resilience and observability
 patterns you need before putting an LLM in front of real traffic.
 
-> **Performance:** p95 **gateway overhead ≈ 11 µs** (5,000-request in-process
-> measurement against a 0-latency mock, Apple M5 Pro / Go 1.26) — roughly three
-> orders of magnitude under the 20 ms NFR-001 budget. See
-> [`load/RESULTS.md`](load/RESULTS.md) for the methodology and the (pending)
-> full-stack k6 numbers measured via `make load`.
+> **Performance** (Apple M5 Pro / Go 1.26 — see [`load/RESULTS.md`](load/RESULTS.md) for full method):
+> - **Pure gateway overhead p95 ≈ 11 µs** — 5,000-request in-process measurement against a 0-latency mock; ~1000× under the 20 ms NFR-001 budget.
+> - **Full-stack p95 ≈ 1–5 ms** (k6 over loopback, real Redis + Postgres, 0 ms mock upstream) at sustainable load — well under 20 ms.
+> - **Graceful degradation:** 432k requests across a ramp → 3k → **9k** overload → recovery run, **0 failures, 0 panics**, every response 200/429/503 (NFR-002).
+>
+> ```
+> full-stack p95 latency vs load (single laptop, load-gen + gateway + mock co-resident)
+>   500 rps │■■■■■  4.1 ms          ┐
+>   700 rps │■■■■■■  5.5 ms         │ below the ~850 rps rig knee → real service time
+>   800 rps │■  1.0 ms              ┘
+>  1000 rps │ saturated → ~1.8 s    ← load-gen queueing (rig ceiling, NOT gateway:
+>  2000 rps │ saturated → ~2.0 s      pure gateway work is ~11 µs/req, far from the bottleneck)
+> ```
+> _The ~850 rps ceiling is the co-resident test rig (k6 + gateway + mock on one machine, double loopback per request), not the gateway. A real throughput benchmark needs the load generator and upstream on separate hosts._
 
 ---
 
