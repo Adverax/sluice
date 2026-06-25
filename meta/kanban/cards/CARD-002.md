@@ -1,6 +1,6 @@
 # CARD-002: Provider interface & mock
 
-**Status:** ready
+**Status:** done
 **Priority:** P1
 **Category:** feature
 **Estimate:** 1.5d
@@ -11,11 +11,11 @@
 **Worktree:** —
 **Source:** meta/architecture/handoff.md#increment-1
 **Depends on:** CARD-001
-**Review score:** —
-**Started:** —
-**Closed:** —
-**Actual:** —
-**Merge commit:** —
+**Review score:** 9.0 (1 cycle; 0 critical/important; 6 provider unit tests ✓; FR ACs deferred to CARD-003/004)
+**Started:** 2026-06-25T07:56:05Z
+**Closed:** 2026-06-25T08:03:57Z
+**Actual:** 0.1d
+**Merge commit:** e2f2af9
 **Blocked by:** —
 
 ## What to implement
