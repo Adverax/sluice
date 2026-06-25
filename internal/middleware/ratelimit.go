@@ -38,6 +38,21 @@ type localLimiter interface {
 	Allow(key string) ratelimit.Decision
 }
 
+// rejectRecorder is the narrow metrics port the rate-limit middleware depends on
+// (ports & adapters, ADR-0008): it records a single 429 rejection without the
+// middleware importing Prometheus. *metrics.Metrics and metrics.NopRecorder both
+// satisfy it. Kept as a one-method interface so a Redis/limiter blip in metrics
+// wiring can never affect the reject decision.
+type rejectRecorder interface {
+	IncRateLimitRejected()
+}
+
+// nopRejectRecorder is the default recorder when none is injected, so the
+// reject path never needs a nil check.
+type nopRejectRecorder struct{}
+
+func (nopRejectRecorder) IncRateLimitRejected() {}
+
 // RateLimiter is the net/http rate-limit middleware (COMP-008). It composes the
 // LOCAL token-bucket registry (fast path) with the DISTRIBUTED repository (the
 // global cross-instance cap, ADR-0010). A request must pass BOTH tiers to reach
@@ -59,6 +74,7 @@ type RateLimiter struct {
 	logger    *slog.Logger
 	cookie    bool
 	mintKey   func() string
+	metrics   rejectRecorder
 }
 
 // RateLimiterOption configures a RateLimiter (functional options, CON-001).
@@ -80,6 +96,18 @@ func WithKeyMinter(fn func() string) RateLimiterOption {
 	}
 }
 
+// WithRejectRecorder injects the metrics recorder used to count 429 rejections
+// (ratelimit_rejected_total). The middleware depends only on the one-method
+// rejectRecorder port, never on Prometheus types (ADR-0008). A nil recorder
+// leaves the default no-op in place.
+func WithRejectRecorder(rec rejectRecorder) RateLimiterOption {
+	return func(m *RateLimiter) {
+		if rec != nil {
+			m.metrics = rec
+		}
+	}
+}
+
 // NewRateLimiter builds the middleware. local is the per-key token-bucket
 // registry; repo is the distributed global-cap port (pass an in-memory or Redis
 // implementation, or nil to disable the distributed tier and rely on the local
@@ -94,6 +122,7 @@ func NewRateLimiter(local localLimiter, repo ratelimit.RateLimitRepository, glob
 		logger:    logger,
 		cookie:    true,
 		mintKey:   mintEphemeralKey,
+		metrics:   nopRejectRecorder{},
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -221,6 +250,11 @@ func isWellFormedEphemeralKey(v string) bool {
 // reject writes a 429 with a Retry-After header and does NOT call next, so no
 // provider/proxy/pool work runs (AC-010, INV-004).
 func (m *RateLimiter) reject(w http.ResponseWriter, r *http.Request, retryAfter time.Duration, tier string) {
+	// Count the 429 at the reject path (ratelimit_rejected_total). Done before
+	// writing the response so the metric reflects every rejection regardless of
+	// which tier (local/distributed) triggered it.
+	m.metrics.IncRateLimitRejected()
+
 	secs := int(retryAfter.Round(time.Second) / time.Second)
 	if retryAfter <= 0 {
 		secs = int(defaultRetryAfter / time.Second)

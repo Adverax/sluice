@@ -104,4 +104,66 @@ ADR-0008: all observability is injected; no package-level globals.
 
 ## Worktree notes
 
-—
+Implemented the full observability layer on branch `card/009-observability`.
+
+**Packages / files**
+- `internal/metrics/` — `metrics.go` (injected `*prometheus.Registry` via
+  `promauto.With(reg)`, ADR-0008; the six metrics; `Recorder` port +
+  `NopRecorder`), `middleware.go` (HTTP `http_requests_total` +
+  `http_request_duration_seconds` + `gateway_inflight_requests` gauge),
+  `infer.go` (`InstrumentInferFunc` → `provider_request_duration_seconds`),
+  `metrics_test.go`.
+- `internal/tracing/` — `tracing.go` (OTel SDK init, OTLP/HTTP exporter, BATCH
+  processor, no-op fallback, `NewWithProvider` test seam), `infer.go` (nested
+  `provider.infer` span), `tracing_test.go`.
+- `internal/middleware/` — `recover.go` (`Recoverer` + `SafeGo`), `tracing.go`
+  (root-span HTTP middleware), `recover_test.go`; `ratelimit.go` gained an
+  injected `rejectRecorder` port (`WithRejectRecorder`).
+- `internal/server/server.go` — `WithMetricsRegistry`; `GetMetrics` now serves
+  `promhttp.HandlerFor(reg, …)` via a `metricsResponse` adapter on the generated
+  `GetMetricsResponseObject` seam (no change to `api.gen.go` / `openapi.yaml`).
+- `cmd/gateway/main.go` — composition root: builds `prometheus.NewRegistry()`,
+  `metrics.New`, `tracing.New` (endpoint from `GATEWAY_OTEL_ENDPOINT`), wires the
+  chain `recover → logging → tracing → metrics → rate-limit → counting → routes`.
+
+**Metric wiring**
+- `http_requests_total{route,status}` + `http_request_duration_seconds{route}` +
+  `gateway_inflight_requests`: outer metrics middleware (inflight inc/dec in a
+  defer so a panic still decrements).
+- `provider_request_duration_seconds{provider}`: `met.InstrumentInferFunc`
+  wraps the composed pool→retry→breaker→provider InferFunc.
+- `ratelimit_rejected_total`: incremented at the 429 reject path via the injected
+  `rejectRecorder` (ratelimit never imports Prometheus — ADR-0008 boundary).
+- `breaker_state{provider}`: set from `breaker.WithOnStateChange` (closed=0,
+  half-open=1, open=2) via `met.SetBreakerState` — breaker stays Prometheus-free.
+
+**Tracing collector-down strategy (AC-050)**: BATCH (async) span processor, so
+exports run off the request path; exporter/resource init errors are logged at
+WARN and downgrade to a no-op provider (never block boot or a request). Test
+wires an always-erroring exporter through the batch processor and asserts 200 +
+no hang.
+
+**Panic recovery**: `Recoverer` (outermost) recovers handler-goroutine panics →
+500 + `logging.LogPanic` (ERROR + `panic_value` + stack), process survives;
+re-raises `http.ErrAbortHandler`. `SafeGo` wraps detached goroutines (a panic in
+a detached goroutine can't be caught by the handler defer — Go semantics) with
+its own recover. AC-041 (`TestLogging_PanicLoggedAtError`) left untouched; the
+middleware reuses `logging.LogPanic`.
+
+**Deps added**: `github.com/prometheus/client_golang`,
+`go.opentelemetry.io/otel` + `/sdk` + `/exporters/otlp/otlptrace/otlptracehttp`.
+
+**AC → test**
+- AC-029 → `TestMetrics_ExposesRequiredMetrics`
+- AC-048 → `TestMetrics_AllSixMetricsPresent`
+- AC-030 → `TestTracing_EndToEndSpanCreated` (tracetest SpanRecorder, ≥2 spans,
+  single trace)
+- AC-050 → `TestTracing_CollectorDown_DoesNotBreakRequest`
+- AC-033 → `TestPanicRecovery_Returns500AndContinues`
+- AC-034 → `TestPanicRecovery_SubgoroutinePanicHandled`
+- AC-041 → existing `TestLogging_PanicLoggedAtError` (kept green)
+
+**Status**: `go build ./...` ✓, `go vet ./...` ✓, `go test -race ./...` ✓ (all
+packages), `go generate ./...` diff-clean (api.gen.go / openapi.yaml untouched),
+`go mod tidy` settled. Pre-existing `SA1019 api.GetSwagger` lint warning in
+server.go is out of scope (unchanged code).
