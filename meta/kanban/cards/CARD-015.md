@@ -9,7 +9,7 @@
 **TDD:** —
 **Branch:** card/015-conformance-tweaks
 **Worktree:** —
-**Source:** doc/requirements-audit.md (gap #5: minor spec-conformance items)
+**Source:** post-v1 conformance pass (gap #5: minor spec-conformance items)
 **Depends on:** CARD-005, CARD-010
 **Review score:** 9.0 (1 cycle; 0 critical/important; AC-015a–c ✓; integration live-green)
 **Started:** 2026-06-25T14:24:09Z

@@ -9,7 +9,7 @@
 **TDD:** —
 **Branch:** card/013-http-provider-pooled-client
 **Worktree:** —
-**Source:** doc/requirements-audit.md (gap #4: connection pooling unexercised + real-upstream ctx cancellation)
+**Source:** post-v1 conformance pass (gap #4: connection pooling unexercised + real-upstream ctx cancellation)
 **Depends on:** CARD-003, CARD-002
 **Review score:** 9.5 (1 cycle; 0 critical/important; AC-013a–d ✓; pooling proven via httptrace)
 **Started:** 2026-06-25T13:18:50Z

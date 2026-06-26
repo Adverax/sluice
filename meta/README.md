@@ -40,9 +40,8 @@ A couple of honest reading notes for [`kanban/`](kanban/):
   severity gate blocked ~40% of cards on genuine issues (a rate-limit DoS, an auth bypass,
   response-body corruption, a billing data-loss bug, metric-cardinality blowups) — all fixed
   before merge. That's the loop doing its job, not a blemish.
-- The later cards (CARD-013/014/015) and `doc/requirements-audit.md` are a **post-v1
-  conformance pass**: an audit of the build against the original spec, and the hardening that
-  closed every gap it found.
+- The later cards (CARD-013/014/015) are a **post-v1 conformance pass**: an audit of the
+  build against the original spec, and the hardening that closed every gap it found.
 
 In short: this folder is meant to be read. It's the part that turns "a working gateway" into
 "a worked example."

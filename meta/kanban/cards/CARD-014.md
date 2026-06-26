@@ -9,7 +9,7 @@
 **TDD:** —
 **Branch:** card/014-streaming-resilience
 **Worktree:** —
-**Source:** doc/requirements-audit.md (gap #3: streaming path bypasses pool/breaker + provider metrics/span)
+**Source:** post-v1 conformance pass (gap #3: streaming path bypasses pool/breaker + provider metrics/span)
 **Depends on:** CARD-004, CARD-007, CARD-008, CARD-009, CARD-013
 **Review score:** 8.5 (2 cycles; 0 crit/imp; +composed-chain cancel test & nil-guards; AC-014a–d ✓)
 **Started:** 2026-06-25T13:51:36Z
