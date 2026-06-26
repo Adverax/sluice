@@ -5,9 +5,12 @@
 
 ---
 
-## Ready (0)
+## Ready (2) — OpenAI compatibility increment
 
-_none_
+| CARD | Title | Pri | Cat | Est | Depends | Skill |
+|------|-------|-----|-----|-----|---------|-------|
+| CARD-016 | OpenAI-compatible upstream provider adapter (Ollama primary) | P1 | feature | 2d | — | golang-pro |
+| CARD-017 | OpenAI-compatible edge (drop-in for OpenAI SDKs) | P1 | feature | 2.5d | CARD-016 | golang-pro |
 
 ---
 
