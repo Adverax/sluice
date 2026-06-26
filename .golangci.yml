@@ -1,22 +1,34 @@
-# golangci-lint configuration (CON-004). The CI lint job runs `golangci-lint run`
-# and is mandatory for every PR. At minimum staticcheck + errcheck + govet are
-# enabled per the card; gofmt/ineffassign/unused round out a sensible baseline.
+# golangci-lint configuration (CON-004), schema v2.
+# The CI lint job runs `golangci-lint run` and is mandatory for every PR/push.
+# v2's default linter set covers errcheck, govet, ineffassign, staticcheck (incl.
+# the SA/ST/QF families) and unused; gofmt runs as a formatter. That matches the
+# original baseline. Integration-tagged files are linted too so the deferred-path
+# tests stay clean.
+version: "2"
 run:
-  timeout: 5m
-  # Lint the integration-tagged files too so the deferred-path tests stay clean.
   build-tags:
     - integration
-
 linters:
-  enable:
-    - staticcheck   # incl. SA* (the api.GetSwagger SA1019 deprecation is fixed)
-    - errcheck      # unchecked errors
-    - govet         # go vet
-    - ineffassign   # ineffectual assignments
-    - unused        # unused code
-    - gofmt         # formatting
-
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 issues:
-  # Show all findings (CI gate must see everything).
   max-issues-per-linter: 0
   max-same-issues: 0
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

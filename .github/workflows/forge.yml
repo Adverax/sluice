@@ -28,17 +28,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout project
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Checkout forge (private plugin)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: Adverax/forge
           ref: main                       # pin to a tag/SHA for reproducible gates
           token: ${{ secrets.FORGE_TOKEN }}
           path: .forge
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
 

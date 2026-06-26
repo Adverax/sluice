@@ -240,7 +240,7 @@ func isWellFormedEphemeralKey(v string) bool {
 		return false
 	}
 	for _, ch := range tail {
-		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
 			return false
 		}
 	}
