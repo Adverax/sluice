@@ -62,7 +62,7 @@ recover → logging → tracing → metrics → rate-limit → in-flight count �
 | **Operating it** | [`docs/role/operator/`](docs/role/operator/) — running the stack, health, the metric catalog, tuning, shutdown |
 | **How it works inside** | [`docs/how-it-works/`](docs/how-it-works/) — layered, code-grounded mechanism docs per aspect (with diagrams) |
 | **Why it's built this way** | [`meta/`](meta/README.md) — ADRs, C4 diagrams, the domain model, requirements traceability, and the build log |
-| **The original spec** | [`doc/requirements.md`](doc/requirements.md) — the brief this was built to |
+| **The original spec** | [`docs/requirements.md`](docs/requirements.md) — the brief this was built to |
 
 ---
 

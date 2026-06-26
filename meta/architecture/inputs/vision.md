@@ -72,4 +72,4 @@ The goal is to complete this in a few days. The build proceeds in layers (see §
 specification), each layer being a working state and a separate commit. A clean commit
 history is itself a signal.
 
-_Source: doc/requirements.md (full specification), 2026-06-24._
+_Source: docs/requirements.md (full specification), 2026-06-24._

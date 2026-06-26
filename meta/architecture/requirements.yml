@@ -534,38 +534,38 @@ constraints:
       web frameworks, no "magic" ORMs. Dependencies: pgx/v5, go-redis/v9,
       golang.org/x/time/rate, golang.org/x/sync/errgroup, sony/gobreaker,
       prometheus/client_golang, OpenTelemetry SDK.
-    source: doc/requirements.md §3, §9
+    source: docs/requirements.md §3, §9
 
   - id: CON-002
     type: technical
     statement: >
       Minimal external dependencies; no exotic packages — only defensible
       choices with active communities.
-    source: doc/requirements.md §9
+    source: docs/requirements.md §9
 
   - id: CON-003
     type: organizational
     statement: >
       One service, not microservices. Idiomatic directory structure per
-      doc/requirements.md §4.
-    source: doc/requirements.md §4, §9
+      docs/requirements.md §4.
+    source: docs/requirements.md §4, §9
 
   - id: CON-004
     type: technical
     statement: >
       CI: GitHub Actions — build + test -race + golangci-lint are mandatory for every PR.
-    source: doc/requirements.md §3
+    source: docs/requirements.md §3
 
   - id: CON-005
     type: technical
     statement: >
       make up brings up the full stack (gateway + postgres + redis + prometheus + grafana)
       via docker-compose with a single command.
-    source: doc/requirements.md §3
+    source: docs/requirements.md §3
 
   - id: CON-006
     type: technical
     statement: >
       Writing usage metrics to Postgres is performed exclusively asynchronously (outside
       the hot HTTP handler path). Synchronous writes on the request path are prohibited.
-    source: doc/requirements.md §7, US-015
+    source: docs/requirements.md §7, US-015
