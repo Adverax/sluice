@@ -11,11 +11,9 @@ _none_
 
 ---
 
-## In Progress (1) — OpenAI compatibility increment
+## In Progress (0)
 
-| CARD | Title | Phase | Pri | Est | Branch |
-|------|-------|-------|-----|-----|--------|
-| CARD-017 | OpenAI-compatible edge (drop-in for OpenAI SDKs) | implementation | P1 | 2.5d | card/017-openai-compatible-edge |
+_none_
 
 ---
 
@@ -25,7 +23,7 @@ _none_
 
 ---
 
-## Done (16)
+## Done (17)
 
 | CARD | Title | Pri | Score | Actual | Merge |
 |------|-------|-----|-------|--------|-------|
@@ -45,6 +43,7 @@ _none_
 | CARD-014 | Streaming through resilience seam (gap #3) | P1 | 8.5 | 0.1d | 9770321 |
 | CARD-015 | Conformance: token-bucket, buffer-size metric, drained/flushed log (gap #5) | P2 | 9.0 | 0.1d | a24b58d |
 | CARD-016 | OpenAI-compatible upstream provider adapter (Ollama primary) | P1 | 9.0 | 0.1d | db94236 |
+| CARD-017 | OpenAI-compatible edge (drop-in for OpenAI SDKs) | P1 | 9.5 | 0.1d | 0eb8c93 |
 
 ---
 

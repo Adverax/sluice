@@ -1,6 +1,6 @@
 # CARD-017: OpenAI-compatible edge (drop-in for OpenAI SDKs)
 
-**Status:** ready
+**Status:** done
 **Priority:** P1
 **Category:** feature
 **Estimate:** 2.5d
@@ -8,14 +8,14 @@
 **Skill:** golang-pro
 **TDD:** —
 **Branch:** card/017-openai-compatible-edge
-**Worktree:** ../sluice-card-017
+**Worktree:** —
 **Source:** meta/architecture/handoff.md#6-increment-openai-compatibility
 **Depends on:** CARD-016 ✓ (merged db94236)
-**Review score:** —
+**Review score:** 9.5 (2 cycles; cycle-1 important: scalar `stop` 400 → fixed; AC-053..061 ✓; integration live-green)
 **Started:** 2026-06-26T11:38:20Z
-**Closed:** —
-**Actual:** —
-**Merge commit:** —
+**Closed:** 2026-06-26T12:21:28Z
+**Actual:** 0.1d
+**Merge commit:** 0eb8c93
 **Blocked by:** —
 
 ## What to implement
