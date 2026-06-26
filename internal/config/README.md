@@ -32,6 +32,9 @@ If a variable is set but malformed or `<= 0`, `Load` returns an error immediatel
 | `GATEWAY_IDLE_TIMEOUT` | `120s` | Keep-alive idle timeout |
 | `GATEWAY_SHUTDOWN_TIMEOUT` | `30s` | Graceful drain budget |
 | `GATEWAY_UPSTREAM_TIMEOUT` | `30s` | Upstream HTTP client timeout |
+| `GATEWAY_UPSTREAM_URL` | _(empty → in-process mock)_ | OpenAI-compatible upstream base URL, **including the `/v1` segment** (e.g. `http://localhost:11434/v1` for Ollama). |
+| `GATEWAY_UPSTREAM_MODEL` | `mock` | Fallback upstream model when a request omits `model` (e.g. `llama3.2`, `gpt-4o-mini`). |
+| `GATEWAY_UPSTREAM_API_KEY` | _(empty)_ | Optional upstream bearer key (omit for Ollama; set `sk-…` for OpenAI). |
 | `GATEWAY_REDIS_URL` | `redis://localhost:6379` | Redis connection string |
 | `GATEWAY_REDIS_DIAL_TIMEOUT` | `5s` | Redis dial timeout |
 | `GATEWAY_REDIS_READ_TIMEOUT` | `3s` | Redis read timeout |

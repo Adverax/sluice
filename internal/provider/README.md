@@ -20,7 +20,7 @@ error, or cancellation.
 
 ## Canonical types
 
-- `Request` — `Model`, `Messages []Message`, `Stream`, `MaxTokens`, `*Temperature` (provider-agnostic).
+- `Request` — `Model`, `Messages []Message`, `Stream`, `MaxTokens`, `*Temperature`, `*TopP`, `Stop []string` (provider-agnostic; `TopP`/`Stop` carry the OpenAI `top_p`/`stop` fields from the edge through to an OpenAI-compatible upstream, ADR-0012/0013).
 - `Response` — `Model`, `Content`, `FinishReason`, normalized `Usage` (so metering/CARD-010 reads canonical usage only).
 - `Chunk` — one streamed delta: `Content`, `Done` (terminal), `Usage` (on terminal chunk), `Err` (mid-stream failure).
 - `Message` / `Role` (system|user|assistant) / `Usage{Prompt,Completion,TotalTokens}`.

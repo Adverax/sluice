@@ -105,4 +105,55 @@ CARD-016 (the upstream already speaks OpenAI; this flips the edge to match).
 
 ## Worktree notes
 
-—
+Implemented on branch `card/017-openai-compatible-edge`.
+
+**Contract (`api/openapi.yaml`, regenerated diff-clean).** Reworked
+`POST /v1/chat/completions` to the real OpenAI wire shape: request
+`{model, messages[{role,content}], stream, temperature, top_p, max_tokens, stop}`
+with `additionalProperties: true` on BOTH the request and message schemas
+(liberal-accept); unary `chat.completion` response
+`{id, object, created, model, choices:[{index, message:{role,content},
+finish_reason}], usage}`; streaming documented as `text/event-stream`; OpenAI
+error envelope `{error:{message,type,code}}` (+ added 401). `go generate ./...`
+regenerated `internal/api/api.gen.go` and is **idempotent / diff-clean**
+(verified by re-running and diffing).
+
+**DTO mapping (`internal/server/edge.go` new + `server.go`).**
+- Request→canonical: forwards model/messages/stream/temperature/top_p/max_tokens/
+  stop; unknown fields ignored (not forwarded); `n>1` → OpenAI-shaped 400 without
+  contacting the provider; array/multimodal content rejected by the validator.
+- canonical Response→unary: edge-generated `id` (`chatcmpl-`+crypto/rand hex),
+  `created` (time.Now().Unix()), `object` "chat.completion"; exactly one
+  `choices[0]` role "assistant"; `system_fingerprint` omitted.
+- canonical Chunk→stream: `chat.completion.chunk` SSE events with stable
+  id/created/model across the stream, a final empty-delta+finish_reason chunk,
+  then literal `data: [DONE]`. Per-chunk flush + ctx-cancel + CARD-014 resilience
+  seam unchanged.
+- Errors: gateway 400/401/429/500/502/503 + mapped upstream errors → OpenAI
+  envelope. Updated the rate-limit and recover middleware bodies to the envelope
+  too (AC-060). Retry-After headers preserved.
+
+**Canonical extension.** Added `TopP *float64` and `Stop []string` to
+`provider.Request` and wired them edge→canonical→`HTTPProvider.toOAIRequest`, so
+`top_p`/`stop` now actually forward upstream (CARD-016 fields were unpopulated).
+
+**Tests.** Updated all edge/server/api/resilience tests asserting the old flat
+shape. Added `internal/server/openai_edge_test.go` with AC-053..061:
+`TestEdge_OpenAIRequest_Accepted` (053), `…_UnknownFields_IgnoredNot400` (054),
+`…_UnsupportedContent_Returns400` (055, n>1 + array content), `…_UnaryResponse_OpenAIShape`
+(056), `…_UnaryResponse_EdgeGeneratedFields` (057, unique ids + no
+system_fingerprint), `…_Streaming_OpenAIChunksAndDone` (058), `…_GatewayError_OpenAIShape`
+(060), `…_UpstreamError_MappedToOpenAIShape` (061).
+
+**Docs + demo.** README curl/SDK examples + integrator docs (chat-completions,
+streaming, errors-and-resilience, api-reference, getting-started, rate-limits)
+reshaped to OpenAI; added an optional `ollama` docker-compose profile
+(`--profile ollama`, NOT default — mock stays the default `make up` upstream) +
+documented `GATEWAY_UPSTREAM_URL=http://ollama:11434/v1` /
+`GATEWAY_UPSTREAM_MODEL=llama3.2` in README + config README.
+
+**Verification.** `go build ./...` ✓; `go test -race ./...` ✓ (19 pkgs);
+`go test -tags=integration -race -p 1 ./internal/integration/` ✓ (Docker /
+testcontainers); `go generate ./...` diff-clean ✓; `go vet` + gofmt clean;
+`go mod tidy` no-op; golangci-lint v2 (v2.1.6 via `go run`, since the local
+binary is v1 / incompatible with the v2 config) reports **0 issues** repo-wide.

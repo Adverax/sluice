@@ -6,10 +6,17 @@ client should do.
 
 ## Error body shape
 
-All error responses use this JSON structure:
+All error responses use the **OpenAI error envelope**, so unmodified OpenAI SDKs
+parse them:
 
 ```json
-{"error": "<machine-readable code>", "message": "<human-readable description>"}
+{
+  "error": {
+    "message": "<human-readable description>",
+    "type": "<error type, e.g. invalid_request_error>",
+    "code": "<machine-readable code, or null>"
+  }
+}
 ```
 
 ## Status codes
@@ -29,8 +36,9 @@ and will not resolve itself on retry.
 **Cause:** The `model` value in the request body is not registered on this
 gateway instance.
 
-**What to do:** Check the `model` field. In v1 the only available model is
-`"mock"`. Do not retry without changing the request.
+**What to do:** Check the `model` field. The default demo model is `"mock"`; a
+gateway wired to a real backend exposes that backend's model names. Do not retry
+without changing the request.
 
 ---
 

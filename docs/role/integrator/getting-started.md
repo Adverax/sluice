@@ -23,9 +23,17 @@ Expected response (HTTP 200):
 
 ```json
 {
+  "id": "chatcmpl-9f8c1a2b3c4d5e6f70819a2b",
+  "object": "chat.completion",
+  "created": 1718000000,
   "model": "mock",
-  "content": "this is a mock completion",
-  "finish_reason": "stop",
+  "choices": [
+    {
+      "index": 0,
+      "message": {"role": "assistant", "content": "this is a mock completion"},
+      "finish_reason": "stop"
+    }
+  ],
   "usage": {
     "prompt_tokens": 0,
     "completion_tokens": 0,
@@ -34,12 +42,16 @@ Expected response (HTTP 200):
 }
 ```
 
-## What the v1 model does
+This is the **real OpenAI `chat.completion` shape**, so an unmodified OpenAI SDK
+pointed at sluice's base URL works as a drop-in.
 
-The only model available in v1 is `mock`. It always returns the string
-`"this is a mock completion"` with zero token counts. This lets you test
-the full integration contract — request validation, rate limiting, caching,
-error handling — before real provider adapters are added.
+## What the default model does
+
+The default demo upstream is an in-process `mock` model: it always returns
+`"this is a mock completion"` with zero token counts. This lets you test the full
+integration contract — request validation, rate limiting, caching, error
+handling — without a real backend. Point the gateway at a real OpenAI-compatible
+backend (Ollama, OpenAI, vLLM, LM Studio) to use that backend's model names.
 
 ## Required header
 

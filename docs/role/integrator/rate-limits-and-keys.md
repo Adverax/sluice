@@ -56,7 +56,7 @@ HTTP/1.1 429 Too Many Requests
 Retry-After: <seconds>
 Content-Type: application/json
 
-{"error":"rate_limited","message":"rate limit exceeded; retry later"}
+{"error":{"message":"rate limit exceeded; retry later","type":"rate_limit_error","code":"rate_limited"}}
 ```
 
 The `Retry-After` header tells you the minimum number of seconds to wait before

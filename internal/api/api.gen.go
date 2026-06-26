@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/getkin/kin-openapi/openapi3"
+	"github.com/oapi-codegen/runtime"
 )
 
 // Defines values for MessageRole.
@@ -42,8 +43,10 @@ func (e MessageRole) Valid() bool {
 	}
 }
 
-// ChatCompletionRequest A chat completion request. Aligned with the canonical provider.Request
-// shape (mapped via the ACL in CARD-003).
+// ChatCompletionRequest A real OpenAI `/v1/chat/completions` request (ADR-0012 v1 subset). Only
+// `model`, `messages`, `stream`, `temperature`, `top_p`, `max_tokens` and
+// `stop` are modeled and forwarded upstream; every other field is
+// accepted-but-ignored via `additionalProperties: true` (liberal-accept).
 type ChatCompletionRequest struct {
 	// MaxTokens Optional upper bound on the completion length.
 	MaxTokens *int `json:"max_tokens,omitempty"`
@@ -54,37 +57,91 @@ type ChatCompletionRequest struct {
 	// Model The upstream model to run the completion against.
 	Model string `json:"model"`
 
+	// Stop Optional stop sequences that end generation. Accepts a single
+	// string or an array of strings, matching the OpenAI wire contract.
+	Stop *ChatCompletionRequest_Stop `json:"stop,omitempty"`
+
 	// Stream When true, the gateway responds with a `text/event-stream` (SSE)
-	// body instead of a JSON response (CARD-004).
+	// body of `chat.completion.chunk` events terminated by `data: [DONE]`.
 	Stream *bool `json:"stream,omitempty"`
 
 	// Temperature Optional sampling temperature.
 	Temperature *float32 `json:"temperature,omitempty"`
+
+	// TopP Optional nucleus-sampling probability mass.
+	TopP                 *float32               `json:"top_p,omitempty"`
+	AdditionalProperties map[string]interface{} `json:"-"`
 }
 
-// ChatCompletionResponse A chat completion result. Aligned with the canonical provider.Response.
-type ChatCompletionResponse struct {
-	// Content The assistant completion text.
-	Content string `json:"content"`
+// ChatCompletionRequestStop0 defines model for .
+type ChatCompletionRequestStop0 = string
 
-	// FinishReason The canonical reason the completion ended (e.g. "stop", "length").
-	FinishReason string `json:"finish_reason"`
+// ChatCompletionRequestStop1 defines model for .
+type ChatCompletionRequestStop1 = []string
+
+// ChatCompletionRequest_Stop Optional stop sequences that end generation. Accepts a single
+// string or an array of strings, matching the OpenAI wire contract.
+type ChatCompletionRequest_Stop struct {
+	union json.RawMessage
+}
+
+// ChatCompletionResponse A real OpenAI `chat.completion` object (ADR-0012). `id`, `object` and
+// `created` are generated at the edge (not passed through from upstream);
+// `system_fingerprint` is omitted.
+type ChatCompletionResponse struct {
+	// Choices The completion choices (always exactly one — index 0).
+	Choices []Choice `json:"choices"`
+
+	// Created Unix timestamp (seconds) when the gateway built the response.
+	Created int64 `json:"created"`
+
+	// Id An edge-generated completion id, prefixed "chatcmpl-".
+	Id string `json:"id"`
 
 	// Model The model that produced the completion.
 	Model string `json:"model"`
 
-	// Usage Token accounting for a completion. Aligned with the canonical
-	// provider.Usage.
+	// Object Always "chat.completion".
+	Object string `json:"object"`
+
+	// Usage Token accounting for a completion (OpenAI shape). Aligned with the
+	// canonical provider.Usage.
 	Usage Usage `json:"usage"`
 }
 
-// Error A structured JSON error body.
+// Choice One chat.completion choice. The gateway always returns exactly one (index 0).
+type Choice struct {
+	// FinishReason The reason the completion ended (e.g. "stop", "length").
+	FinishReason *string `json:"finish_reason"`
+
+	// Index The choice index (always 0 — n>1 is a non-goal, CON-008).
+	Index int `json:"index"`
+
+	// Message The assistant message inside a chat.completion choice.
+	Message ResponseMessage `json:"message"`
+}
+
+// Error The OpenAI error envelope `{ "error": { message, type, code } }` so
+// unmodified OpenAI SDKs parse gateway and mapped-upstream errors
+// (ADR-0012, FR-020).
 type Error struct {
-	// Error A short, machine-readable error code.
-	Error string `json:"error"`
+	// Error The OpenAI error object carried inside an Error envelope.
+	Error ErrorDetail `json:"error"`
+}
+
+// ErrorDetail The OpenAI error object carried inside an Error envelope.
+type ErrorDetail struct {
+	// Code A short, machine-readable error code (may be null).
+	Code *string `json:"code,omitempty"`
 
 	// Message A human-readable description of the error.
 	Message string `json:"message"`
+
+	// Param The request parameter the error relates to, when applicable (may be null).
+	Param *string `json:"param,omitempty"`
+
+	// Type The OpenAI error type (e.g. "invalid_request_error", "server_error").
+	Type string `json:"type"`
 }
 
 // HealthStatus Liveness probe response.
@@ -93,13 +150,18 @@ type HealthStatus struct {
 	Status string `json:"status"`
 }
 
-// Message One chat message. Aligned with the canonical provider.Message.
+// Message One OpenAI chat message. `content` is a plain string (the v1 subset);
+// multimodal/array content is a documented non-goal (ADR-0012, CON-008)
+// and is rejected with an OpenAI-shaped 400 by the handler.
+// `additionalProperties: true` so SDK-supplied extras (e.g. `name`) are
+// accepted and ignored, never a 400 (liberal-accept).
 type Message struct {
 	// Content The message text.
 	Content string `json:"content"`
 
 	// Role The author of the message.
-	Role MessageRole `json:"role"`
+	Role                 MessageRole            `json:"role"`
+	AdditionalProperties map[string]interface{} `json:"-"`
 }
 
 // MessageRole The author of the message.
@@ -114,34 +176,357 @@ type ReadinessStatus struct {
 	Status string `json:"status"`
 }
 
-// Usage Token accounting for a completion. Aligned with the canonical
-// provider.Usage.
+// ResponseMessage The assistant message inside a chat.completion choice.
+type ResponseMessage struct {
+	// Content The assistant completion text.
+	Content string `json:"content"`
+
+	// Role Always "assistant" for a completion choice.
+	Role string `json:"role"`
+}
+
+// Usage Token accounting for a completion (OpenAI shape). Aligned with the
+// canonical provider.Usage.
 type Usage struct {
 	CompletionTokens int `json:"completion_tokens"`
 	PromptTokens     int `json:"prompt_tokens"`
 	TotalTokens      int `json:"total_tokens"`
 }
 
-// BadGateway A structured JSON error body.
+// BadGateway The OpenAI error envelope `{ "error": { message, type, code } }` so
+// unmodified OpenAI SDKs parse gateway and mapped-upstream errors
+// (ADR-0012, FR-020).
 type BadGateway = Error
 
-// BadRequest A structured JSON error body.
+// BadRequest The OpenAI error envelope `{ "error": { message, type, code } }` so
+// unmodified OpenAI SDKs parse gateway and mapped-upstream errors
+// (ADR-0012, FR-020).
 type BadRequest = Error
 
-// InternalServerError A structured JSON error body.
+// InternalServerError The OpenAI error envelope `{ "error": { message, type, code } }` so
+// unmodified OpenAI SDKs parse gateway and mapped-upstream errors
+// (ADR-0012, FR-020).
 type InternalServerError = Error
 
-// NotFound A structured JSON error body.
+// NotFound The OpenAI error envelope `{ "error": { message, type, code } }` so
+// unmodified OpenAI SDKs parse gateway and mapped-upstream errors
+// (ADR-0012, FR-020).
 type NotFound = Error
 
-// ServiceUnavailable A structured JSON error body.
+// ServiceUnavailable The OpenAI error envelope `{ "error": { message, type, code } }` so
+// unmodified OpenAI SDKs parse gateway and mapped-upstream errors
+// (ADR-0012, FR-020).
 type ServiceUnavailable = Error
 
-// TooManyRequests A structured JSON error body.
+// TooManyRequests The OpenAI error envelope `{ "error": { message, type, code } }` so
+// unmodified OpenAI SDKs parse gateway and mapped-upstream errors
+// (ADR-0012, FR-020).
 type TooManyRequests = Error
+
+// Unauthorized The OpenAI error envelope `{ "error": { message, type, code } }` so
+// unmodified OpenAI SDKs parse gateway and mapped-upstream errors
+// (ADR-0012, FR-020).
+type Unauthorized = Error
 
 // CreateChatCompletionJSONRequestBody defines body for CreateChatCompletion for application/json ContentType.
 type CreateChatCompletionJSONRequestBody = ChatCompletionRequest
+
+// Getter for additional properties for ChatCompletionRequest. Returns the specified
+// element and whether it was found
+func (a ChatCompletionRequest) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for ChatCompletionRequest
+func (a *ChatCompletionRequest) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for ChatCompletionRequest to handle AdditionalProperties
+func (a *ChatCompletionRequest) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["max_tokens"]; found {
+		err = json.Unmarshal(raw, &a.MaxTokens)
+		if err != nil {
+			return fmt.Errorf("error reading 'max_tokens': %w", err)
+		}
+		delete(object, "max_tokens")
+	}
+
+	if raw, found := object["messages"]; found {
+		err = json.Unmarshal(raw, &a.Messages)
+		if err != nil {
+			return fmt.Errorf("error reading 'messages': %w", err)
+		}
+		delete(object, "messages")
+	}
+
+	if raw, found := object["model"]; found {
+		err = json.Unmarshal(raw, &a.Model)
+		if err != nil {
+			return fmt.Errorf("error reading 'model': %w", err)
+		}
+		delete(object, "model")
+	}
+
+	if raw, found := object["stop"]; found {
+		err = json.Unmarshal(raw, &a.Stop)
+		if err != nil {
+			return fmt.Errorf("error reading 'stop': %w", err)
+		}
+		delete(object, "stop")
+	}
+
+	if raw, found := object["stream"]; found {
+		err = json.Unmarshal(raw, &a.Stream)
+		if err != nil {
+			return fmt.Errorf("error reading 'stream': %w", err)
+		}
+		delete(object, "stream")
+	}
+
+	if raw, found := object["temperature"]; found {
+		err = json.Unmarshal(raw, &a.Temperature)
+		if err != nil {
+			return fmt.Errorf("error reading 'temperature': %w", err)
+		}
+		delete(object, "temperature")
+	}
+
+	if raw, found := object["top_p"]; found {
+		err = json.Unmarshal(raw, &a.TopP)
+		if err != nil {
+			return fmt.Errorf("error reading 'top_p': %w", err)
+		}
+		delete(object, "top_p")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for ChatCompletionRequest to handle AdditionalProperties
+func (a ChatCompletionRequest) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.MaxTokens != nil {
+		object["max_tokens"], err = json.Marshal(a.MaxTokens)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'max_tokens': %w", err)
+		}
+	}
+
+	if a.Messages != nil {
+		object["messages"], err = json.Marshal(a.Messages)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'messages': %w", err)
+		}
+	}
+
+	object["model"], err = json.Marshal(a.Model)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'model': %w", err)
+	}
+
+	if a.Stop != nil {
+		object["stop"], err = json.Marshal(a.Stop)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'stop': %w", err)
+		}
+	}
+
+	if a.Stream != nil {
+		object["stream"], err = json.Marshal(a.Stream)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'stream': %w", err)
+		}
+	}
+
+	if a.Temperature != nil {
+		object["temperature"], err = json.Marshal(a.Temperature)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'temperature': %w", err)
+		}
+	}
+
+	if a.TopP != nil {
+		object["top_p"], err = json.Marshal(a.TopP)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'top_p': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for Message. Returns the specified
+// element and whether it was found
+func (a Message) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for Message
+func (a *Message) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for Message to handle AdditionalProperties
+func (a *Message) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["content"]; found {
+		err = json.Unmarshal(raw, &a.Content)
+		if err != nil {
+			return fmt.Errorf("error reading 'content': %w", err)
+		}
+		delete(object, "content")
+	}
+
+	if raw, found := object["role"]; found {
+		err = json.Unmarshal(raw, &a.Role)
+		if err != nil {
+			return fmt.Errorf("error reading 'role': %w", err)
+		}
+		delete(object, "role")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for Message to handle AdditionalProperties
+func (a Message) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	object["content"], err = json.Marshal(a.Content)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'content': %w", err)
+	}
+
+	object["role"], err = json.Marshal(a.Role)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'role': %w", err)
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// AsChatCompletionRequestStop0 returns the union data inside the ChatCompletionRequest_Stop as a ChatCompletionRequestStop0
+func (t ChatCompletionRequest_Stop) AsChatCompletionRequestStop0() (ChatCompletionRequestStop0, error) {
+	var body ChatCompletionRequestStop0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromChatCompletionRequestStop0 overwrites any union data inside the ChatCompletionRequest_Stop as the provided ChatCompletionRequestStop0
+func (t *ChatCompletionRequest_Stop) FromChatCompletionRequestStop0(v ChatCompletionRequestStop0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeChatCompletionRequestStop0 performs a merge with any union data inside the ChatCompletionRequest_Stop, using the provided ChatCompletionRequestStop0
+func (t *ChatCompletionRequest_Stop) MergeChatCompletionRequestStop0(v ChatCompletionRequestStop0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsChatCompletionRequestStop1 returns the union data inside the ChatCompletionRequest_Stop as a ChatCompletionRequestStop1
+func (t ChatCompletionRequest_Stop) AsChatCompletionRequestStop1() (ChatCompletionRequestStop1, error) {
+	var body ChatCompletionRequestStop1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromChatCompletionRequestStop1 overwrites any union data inside the ChatCompletionRequest_Stop as the provided ChatCompletionRequestStop1
+func (t *ChatCompletionRequest_Stop) FromChatCompletionRequestStop1(v ChatCompletionRequestStop1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeChatCompletionRequestStop1 performs a merge with any union data inside the ChatCompletionRequest_Stop, using the provided ChatCompletionRequestStop1
+func (t *ChatCompletionRequest_Stop) MergeChatCompletionRequestStop1(v ChatCompletionRequestStop1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t ChatCompletionRequest_Stop) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *ChatCompletionRequest_Stop) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
@@ -364,6 +749,8 @@ type ServiceUnavailableJSONResponse Error
 
 type TooManyRequestsJSONResponse Error
 
+type UnauthorizedJSONResponse Error
+
 type GetHealthzRequestObject struct {
 }
 
@@ -513,6 +900,20 @@ func (response CreateChatCompletion400JSONResponse) VisitCreateChatCompletionRes
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateChatCompletion401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response CreateChatCompletion401JSONResponse) VisitCreateChatCompletionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -742,42 +1143,60 @@ func (sh *strictHandler) CreateChatCompletion(w http.ResponseWriter, r *http.Req
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
+	"cpIcJbcfb/8bAAD//w==",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

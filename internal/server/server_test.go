@@ -31,13 +31,15 @@ func discardLogger() *slog.Logger {
 // the provider is NOT contacted (AC-004/006/007). It can also be configured to
 // return a canonical response or an error.
 type spyProvider struct {
-	resp   provider.Response
-	err    error
-	called bool
+	resp    provider.Response
+	err     error
+	called  bool
+	lastReq provider.Request // the canonical request the edge forwarded (AC-053/054)
 }
 
-func (s *spyProvider) Infer(_ context.Context, _ provider.Request) (provider.Response, error) {
+func (s *spyProvider) Infer(_ context.Context, req provider.Request) (provider.Response, error) {
 	s.called = true
+	s.lastReq = req
 	if s.err != nil {
 		return provider.Response{}, s.err
 	}
@@ -94,8 +96,18 @@ func TestProxy_HappyPath_NonStreaming(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if got.Content != "hello world" || got.Model != "gpt-4" || got.FinishReason != "stop" {
-		t.Errorf("unexpected response: %+v", got)
+	if got.Object != "chat.completion" || got.Model != "gpt-4" {
+		t.Errorf("unexpected response envelope: %+v", got)
+	}
+	if len(got.Choices) != 1 {
+		t.Fatalf("choices = %d, want 1", len(got.Choices))
+	}
+	c := got.Choices[0]
+	if c.Message.Content != "hello world" || c.Message.Role != "assistant" {
+		t.Errorf("unexpected choice message: %+v", c.Message)
+	}
+	if c.FinishReason == nil || *c.FinishReason != "stop" {
+		t.Errorf("finish_reason = %v, want stop", c.FinishReason)
 	}
 	if got.Usage.TotalTokens != 5 {
 		t.Errorf("usage = %+v, want total 5", got.Usage)
@@ -201,8 +213,8 @@ func TestProxy_ProviderError_Returns502(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &apiErr); err != nil {
 		t.Fatalf("decode error body: %v", err)
 	}
-	if apiErr.Error == "" {
-		t.Errorf("expected non-empty error code, got %+v", apiErr)
+	if apiErr.Error.Message == "" || apiErr.Error.Type == "" {
+		t.Errorf("expected OpenAI error envelope, got %+v", apiErr)
 	}
 }
 
@@ -285,8 +297,8 @@ func TestRouter_RoutesToCorrectProvider(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if got.Content != "from claude" {
-		t.Errorf("routed to wrong provider: content = %q", got.Content)
+	if len(got.Choices) != 1 || got.Choices[0].Message.Content != "from claude" {
+		t.Errorf("routed to wrong provider: %+v", got.Choices)
 	}
 }
 

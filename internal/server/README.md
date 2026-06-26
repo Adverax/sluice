@@ -4,14 +4,23 @@
 
 Concrete implementation of the OpenAPI-generated `api.StrictServerInterface`
 (ADR-0011, contract-first). It owns the behaviour behind the generated HTTP
-boundary: maps generated DTOs ↔ canonical `provider.Request/Response`
-(ADR-0009 ACL), routes by model via `proxy.Router` (FR-002), and translates
-`health.Result` onto the spec's readiness schema (FR-009).
+boundary: maps the **real OpenAI `/v1/chat/completions` DTOs** ↔ canonical
+`provider.Request/Response/Chunk` (ADR-0009 ACL, ADR-0012), routes by model via
+`proxy.Router` (FR-002), and translates `health.Result` onto the spec's
+readiness schema (FR-009).
+
+The OpenAI edge adapter lives in `edge.go`: it maps the OpenAI request
+(liberal-accept — unknown fields ignored, `n>1`/array content → OpenAI-shaped
+400), builds the unary `chat.completion` object and the streaming
+`chat.completion.chunk` events with **edge-generated** `id`/`created`/`object`,
+and renders all errors as the OpenAI envelope `{error:{message,type,code}}`
+(FR-020). The OpenAI wire shape never crosses the Provider boundary.
 
 `Handler()` also wires a kin-openapi request-validation middleware
-(`openapi3filter`) in front of all routes: unknown enum values and missing
-required fields are rejected with a structured `400` response **before** any
-handler code runs (ADR-0011).
+(`openapi3filter`) in front of all routes: unknown enum roles and missing
+required fields are rejected with an OpenAI-shaped `400` response **before** any
+handler code runs (ADR-0011). The request schema sets `additionalProperties:
+true`, so SDK extras pass validation and are ignored.
 
 ## Architecture
 
