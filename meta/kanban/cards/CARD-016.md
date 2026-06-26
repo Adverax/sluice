@@ -86,4 +86,51 @@ boundary), ADR-0010 (injected client + explicit timeout), ADR-0013 (this decisio
 
 ## Worktree notes
 
-—
+Implemented in worktree `sluice-card-016` on branch `card/016-openai-upstream-adapter`.
+
+**OpenAI wire mapping (`internal/provider/httpprovider.go`).** Replaced the simplified wire
+types with private `oaiRequest/oaiResponse/oaiStreamEvent/oaiErrorEnvelope` types (ADR-0009 ACL —
+none cross the Provider boundary). Base URL now includes the `/v1` segment; the adapter POSTs to
+`<baseURL>/chat/completions` via `http.NewRequestWithContext` over the injected pooled client.
+- Request: `{model, messages:[{role,content}], stream, temperature?, max_tokens?}` (canonical
+  fields only — CON-007/008; `top_p`/`stop` modeled in the wire struct, forwarded when the
+  canonical Request grows them). `Request.Model` wins; `WithModel` is the fallback.
+- Unary: parse `choices[0].message.content` + `finish_reason` + `usage{...}` → canonical Response;
+  empty-`choices` handled defensively (empty completion, usage still flows).
+- Stream: sets `stream_options:{include_usage:true}`; reads SSE `data:` lines, JSON-decodes each
+  as `{choices:[{delta:{content},finish_reason}], usage?}`, emits a Chunk per non-empty
+  `delta.content`, captures the trailing usage chunk (empty choices + usage) into the terminal
+  `Done` Chunk.Usage, stops on literal `data: [DONE]`. GRACEFUL: missing usage chunk → terminal
+  Done with zero usage (no error, no break); EOF without `[DONE]` also ends with a graceful Done.
+  Drain/close-on-ctx-done discipline preserved (no goroutine leak).
+- Errors: non-2xx → `*provider.StatusError` (5xx retryable / 4xx not unchanged); parses the OpenAI
+  `{error:{message,type,code}}` envelope into the message when present.
+- Auth: `Authorization: Bearer <key>` sent ONLY when the configured key is non-empty (Ollama omits).
+
+**Mock upstream (`internal/provider/mockupstream.go`).** `MockUpstreamHandler` now emits the REAL
+OpenAI shape: unary `chat.completion` (`id:"chatcmpl-mock"`, `object`, `created`, `choices[0].
+message`, `usage`); SSE `chat.completion.chunk` deltas + a final chunk with `finish_reason` +
+(when `include_usage` requested and `OmitStreamUsage` is false) a trailing usage chunk
+(`choices:[]`,`usage`) + literal `data: [DONE]`. New `OmitStreamUsage` option models a backend
+that ignores `include_usage`. Errors emit the OpenAI envelope. Latency/FailStatus/StreamChunks
+honoured. Interface-level `Mock` (`mock.go`) untouched.
+
+**Config + wiring (`internal/config/config.go`, `cmd/gateway/main.go`).** Added
+`GATEWAY_UPSTREAM_API_KEY` (optional) and `GATEWAY_UPSTREAM_MODEL` (default `mock` for the
+in-process mock so the default boot + tests are unchanged; `llama3.2` when an external
+`GATEWAY_UPSTREAM_URL` is set). The adapter is registered for the configured model with
+`WithAPIKey`+`WithModel`; breaker-state seeded for that model. The in-process mock upstream base
+URL now carries `/v1` (`http://host:port/v1`). Mock stays the default when URL is empty
+(`make up` fast). `TestConfig_AllBoundariesHaveTimeouts` green.
+
+**AC → test mapping (all green under `go test -race ./...`):**
+- AC-062 `TestUpstream_OpenAIAdapter_UnaryMapping` (+ `_RequestModelOverride` for model passthrough)
+- AC-063 `TestUpstream_OpenAIAdapter_BearerAuthOptional`
+- AC-064 `TestUpstream_MockUpstream_EmitsOpenAIShape`
+- AC-059 `TestEdge_Streaming_MissingUsage_GracefulZero` (zero usage, no error, no goroutine leak)
+- CARD-013 carryover (pooling/reuse/ctx-cancel/status) adapted to the new wire and kept green.
+
+**Verification:** `go build ./...` clean; `go test -race ./...` green (incl. `-tags integration`);
+`go vet ./...` clean; `go generate ./...` DIFF-CLEAN (no api.gen.go/openapi.yaml change — edge is
+CARD-017); `go mod tidy` no-op. Files touched: cmd/gateway/main.go, internal/config/config.go,
+internal/provider/{httpprovider,mockupstream}.go + their tests. Edge / api / server DTOs untouched.

@@ -32,6 +32,15 @@ const (
 	// address. Override via GATEWAY_MOCK_UPSTREAM_ADDR.
 	defaultMockUpstreamAddr = "127.0.0.1:0"
 
+	// defaultUpstreamModel is the model the OpenAI-compatible upstream adapter is
+	// registered for and forwards (CARD-016, ADR-0013). The IN-PROCESS mock
+	// upstream (GATEWAY_UPSTREAM_URL empty) keeps the historical "mock" model so
+	// the default boot path and existing tests are unchanged; an EXTERNAL upstream
+	// (a real Ollama/OpenAI backend) defaults to the documented "llama3.2". The
+	// override is GATEWAY_UPSTREAM_MODEL.
+	defaultMockUpstreamModel = "mock"
+	defaultUpstreamModel     = "llama3.2"
+
 	defaultRedisDialTimeout = 5 * time.Second
 	defaultRedisReadTimeout = 3 * time.Second
 
@@ -131,11 +140,23 @@ type Upstream struct {
 	// Timeout is the total request timeout for the upstream http.Client.
 	Timeout time.Duration
 
-	// URL, when set, points the HTTPProvider at an EXTERNAL mock-upstream HTTP
-	// endpoint (GATEWAY_UPSTREAM_URL). When empty, cmd/gateway starts an
+	// URL, when set, points the HTTPProvider at an EXTERNAL OpenAI-compatible
+	// upstream HTTP endpoint (GATEWAY_UPSTREAM_URL), including the /v1 segment
+	// (e.g. Ollama http://localhost:11434/v1). When empty, cmd/gateway starts an
 	// in-process mock upstream (see MockUpstreamAddr) and points the provider at
 	// it. Optional; no default.
 	URL string
+
+	// APIKey is the OPTIONAL upstream bearer key (GATEWAY_UPSTREAM_API_KEY). When
+	// non-empty the adapter sends `Authorization: Bearer <key>`; when empty the
+	// header is omitted entirely (Ollama needs no key — ADR-0013 §3). It is the
+	// upstream key, never the client edge key.
+	APIKey string
+
+	// Model is the model the upstream adapter is registered for and forwards
+	// (GATEWAY_UPSTREAM_MODEL). Defaults to "mock" for the in-process mock
+	// upstream and "llama3.2" for an external upstream (ADR-0013 §4).
+	Model string
 
 	// MockUpstreamAddr is the listen address for the in-process mock upstream
 	// started when URL is empty (GATEWAY_MOCK_UPSTREAM_ADDR). Defaults to
@@ -352,6 +373,8 @@ func Load() (*Config, error) {
 		Upstream: Upstream{
 			Timeout:          mustDuration("GATEWAY_UPSTREAM_TIMEOUT", defaultUpstreamTimeout),
 			URL:              getString("GATEWAY_UPSTREAM_URL", ""),
+			APIKey:           getString("GATEWAY_UPSTREAM_API_KEY", ""),
+			Model:            getString("GATEWAY_UPSTREAM_MODEL", upstreamModelDefault(getString("GATEWAY_UPSTREAM_URL", ""))),
 			MockUpstreamAddr: getString("GATEWAY_MOCK_UPSTREAM_ADDR", defaultMockUpstreamAddr),
 		},
 		Redis: Redis{
@@ -501,6 +524,9 @@ func (c *Config) Validate() error {
 	} else if c.Upstream.MockUpstreamAddr == "" {
 		return fmt.Errorf("upstream.MockUpstreamAddr must not be empty when upstream.URL is unset")
 	}
+	if c.Upstream.Model == "" {
+		return fmt.Errorf("upstream.Model must not be empty (set GATEWAY_UPSTREAM_MODEL)")
+	}
 
 	if c.Server.ShutdownTimeout <= 0 {
 		return fmt.Errorf("server.ShutdownTimeout must be > 0, got %s", c.Server.ShutdownTimeout)
@@ -515,6 +541,18 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+// upstreamModelDefault picks the default upstream model based on whether an
+// external upstream URL is configured: the in-process mock keeps "mock" (so the
+// default boot and existing tests are unchanged), an external backend defaults
+// to the documented "llama3.2" (ADR-0013 §4). An explicit GATEWAY_UPSTREAM_MODEL
+// always wins.
+func upstreamModelDefault(url string) string {
+	if url == "" {
+		return defaultMockUpstreamModel
+	}
+	return defaultUpstreamModel
 }
 
 func getString(key, fallback string) string {
