@@ -1,6 +1,6 @@
 # CARD-016: OpenAI-compatible upstream provider adapter (Ollama primary)
 
-**Status:** ready
+**Status:** done
 **Priority:** P1
 **Category:** feature
 **Estimate:** 2d
@@ -11,11 +11,11 @@
 **Worktree:** —
 **Source:** meta/architecture/handoff.md#6-increment-openai-compatibility
 **Depends on:** — (builds on CARD-013 HTTP provider + CARD-002 Provider interface, both merged)
-**Review score:** —
-**Started:** —
-**Closed:** —
-**Actual:** —
-**Merge commit:** —
+**Review score:** 9.0 (1 cycle; 0 critical/important; AC-062/063/064/059 ✓; integration live-green)
+**Started:** 2026-06-26T11:21:38Z
+**Closed:** 2026-06-26T11:38:20Z
+**Actual:** 0.1d
+**Merge commit:** db94236
 **Blocked by:** —
 
 ## What to implement

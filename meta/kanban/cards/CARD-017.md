@@ -8,11 +8,11 @@
 **Skill:** golang-pro
 **TDD:** —
 **Branch:** card/017-openai-compatible-edge
-**Worktree:** —
+**Worktree:** ../sluice-card-017
 **Source:** meta/architecture/handoff.md#6-increment-openai-compatibility
-**Depends on:** CARD-016
+**Depends on:** CARD-016 ✓ (merged db94236)
 **Review score:** —
-**Started:** —
+**Started:** 2026-06-26T11:38:20Z
 **Closed:** —
 **Actual:** —
 **Merge commit:** —
