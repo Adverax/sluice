@@ -156,3 +156,45 @@ Four increments, each a working state, aligned with the 4 contexts and the spec 
 - **Per-IP ephemeral-key issuance cap** (ADR-0001) — anti-bypass guard so anonymous clients cannot mint unbounded ephemeral keys to evade per-key limits. Future hardening.
 - **Durable queue / WAL for billing-grade metering** (ADR-0007) — current design drops on buffer-full and on flush failure (best-effort, not billing-grade). A durable WAL/queue would close the gap if metering becomes revenue-critical.
 - **FR-003 negative-AC nit** — FR-003 (client-cancel) carries only `happy`-kind ACs (AC-008, AC-009); consider adding a negative/boundary AC (e.g. cancel after upstream already responded) for completeness.
+
+---
+
+## 6. Increment — 2026-06-26 — OpenAI compatibility (Variant B; ADR-0012, ADR-0013)
+
+**Goal:** make sluice a real, drop-in **OpenAI-compatible** LLM gateway in front of a real model — **Ollama** as the primary showcase backend (OpenAI / vLLM / LM Studio via config). Both the UPSTREAM adapter and the gateway's own EDGE speak the real OpenAI `/v1/chat/completions` wire format (ports & adapters: OpenAI edge adapter ↔ canonical core ↔ OpenAI upstream adapter). Canonical core + resilience + metering + observability are **unchanged** — the OpenAI shape lives only in the edge and upstream adapters; only canonical `provider.Request`/`Response`/`Chunk` cross the Provider boundary (ADR-0009 preserved).
+
+New requirements: **FR-017..FR-021**; new constraints **CON-007** (endpoint scope) / **CON-008** (non-goals). New config: `GATEWAY_UPSTREAM_URL` (exists; Ollama `http://localhost:11434/v1`), `GATEWAY_UPSTREAM_API_KEY` (optional), `GATEWAY_UPSTREAM_MODEL` (default doc `llama3.2`).
+
+Two independently shippable cards. **CARD-016 ships first** (upstream adapter; edge stays simplified — a valid intermediate state). **CARD-017** then flips the edge to the real OpenAI shape.
+
+### CARD-016 — OpenAI-compatible UPSTREAM adapter
+
+**Scope:** A real HTTP provider adapter (behind the existing `Provider` port, ADR-0009) that speaks the real OpenAI wire to the configured backend.
+- Canonical `Request` → OpenAI `/v1/chat/completions` request (`model`, `messages[{role,content}]`, `stream`, `temperature`, `top_p`, `max_tokens`, `stop`).
+- Parse the real OpenAI response: unary `choices[0].message.content` + `usage` → canonical `Response`; streaming `choices[0].delta` + `[DONE]` → canonical `Chunk`s.
+- Streaming metering: set `stream_options.include_usage=true`, parse the trailing usage chunk into terminal `Chunk.Usage`; **graceful 0/uncounted** if the upstream omits usage (no error, no stream break).
+- Upstream auth: send `Authorization: Bearer <GATEWAY_UPSTREAM_API_KEY>` only when the key is non-empty; **omit when empty** (Ollama).
+- Config: `GATEWAY_UPSTREAM_URL` / `GATEWAY_UPSTREAM_API_KEY` / `GATEWAY_UPSTREAM_MODEL`; **register the adapter for the configured model**; model passed through as-is.
+- **Update the in-process `MockUpstream`** (`mockupstream.go`) to emit the **real OpenAI shape** (unary + SSE `chat.completion.chunk` + `[DONE]` + usage chunk) so unit + load tests exercise the real mapping. **Keep** the interface-level mock `Provider`. Mock stays the default `make up` upstream (fast demo).
+- **Edge stays as-is** (valid intermediate state).
+
+**Covers:** FR-021, FR-019 (upstream/streaming-usage half) · ADR-0013, ADR-0009, ADR-0010 · COMP-005 (Provider Interface & Adapter) · `internal/provider/**.go`, `cmd/gateway/**.go` (config + registration).
+**ACs:** AC-062 (unary mapping), AC-063 (optional bearer auth), AC-064 (mock upstream emits OpenAI shape), AC-059 (streaming missing-usage graceful 0).
+**Tests:** `TestUpstream_OpenAIAdapter_UnaryMapping`, `TestUpstream_OpenAIAdapter_BearerAuthOptional`, `TestUpstream_MockUpstream_EmitsOpenAIShape`, `TestEdge_Streaming_MissingUsage_GracefulZero`.
+
+### CARD-017 — OpenAI-compatible EDGE
+
+**Scope:** Rework the public edge to the real OpenAI request/response/stream/error shape (ADR-0012, under ADR-0011 contract-first discipline).
+- Rework `api/openapi.yaml` to the real OpenAI request/response/stream/error schema with **liberal-accept** (`additionalProperties: true`); modeled subset (`model`, `messages`, `stream`, `temperature`, `top_p`, `max_tokens`, `stop`) forwarded; unknown fields (`seed`, `user`, penalties, `logit_bias`, `response_format`, `n`, `logprobs`) accepted-but-ignored — never 400.
+- `go generate` → regenerate `internal/api/`; update server DTO mapping (OpenAI DTO ↔ canonical `provider.Request`/`Response`/`Chunk`).
+- Unary response: real `chat.completion` shape with **edge-generated** `id` (`chatcmpl-…`) / `created` / `object`; single `choices[0]`; `system_fingerprint` omitted.
+- Streaming: emit `chat.completion.chunk` SSE events + literal `data: [DONE]`.
+- Errors: OpenAI envelope `{error:{message,type,code}}` for 400/401/429/502/503 and mapped upstream errors.
+- Genuine drop-in for OpenAI SDKs; update the integrator API reference (`docs/role/integrator/**`) + README `curl` examples to the OpenAI shape.
+- Add an **OPTIONAL** Ollama docker-compose profile + documented `GATEWAY_UPSTREAM_URL=…:11434/v1` usage; keep the **mock as the default `make up` upstream** so the demo stays fast.
+
+**Covers:** FR-017, FR-018, FR-020, FR-019 (edge/SSE half) · ADR-0012, ADR-0011, ADR-0009 · COMP-001 (HTTP Handler & Router), COMP-002 (Proxy Core) · `api/openapi.yaml`, `internal/api/**.go`, `internal/server/**.go`, `internal/proxy/**.go`, `docs/role/integrator/**`, `README.md`, `docker-compose.yml` (optional Ollama profile).
+**ACs:** AC-053 (accepted), AC-054 (unknown ignored not 400), AC-055 (unsupported content 400), AC-056 (unary OpenAI shape), AC-057 (edge-generated fields), AC-058 (streaming chunks + [DONE]), AC-060 (gateway error shape), AC-061 (upstream error mapped).
+**Tests:** `TestEdge_OpenAIRequest_Accepted`, `TestEdge_UnknownFields_IgnoredNot400`, `TestEdge_UnsupportedContent_Returns400`, `TestEdge_UnaryResponse_OpenAIShape`, `TestEdge_UnaryResponse_EdgeGeneratedFields`, `TestEdge_Streaming_OpenAIChunksAndDone`, `TestEdge_GatewayError_OpenAIShape`, `TestEdge_UpstreamError_MappedToOpenAIShape`.
+
+**Definition of done:** all listed ACs green under `go test -race`; an unmodified OpenAI SDK / `curl` example completes a unary and a streaming chat against sluice (mock upstream by default, Ollama via the optional profile); `make up` still boots fast on the mock; CI (build + test -race + golangci-lint, CON-004) green.

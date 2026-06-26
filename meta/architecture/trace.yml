@@ -197,6 +197,63 @@ links:
       - TestLogging_PanicLoggedAtError
     status: partial
 
+  - req: FR-017
+    description: "Edge accepts the real OpenAI request liberally (additionalProperties); modeled subset forwarded, unknown fields ignored not 400."
+    capabilities: [CAP-001]
+    contexts: [CTX-001]
+    components: [COMP-001, COMP-002]
+    adrs: [ADR-0012, ADR-0011, ADR-0009]
+    tests:
+      - TestEdge_OpenAIRequest_Accepted
+      - TestEdge_UnknownFields_IgnoredNot400
+      - TestEdge_UnsupportedContent_Returns400
+    status: partial
+
+  - req: FR-018
+    description: "Edge returns the real OpenAI unary response shape; id/created/object generated at the edge; single choice."
+    capabilities: [CAP-001]
+    contexts: [CTX-001]
+    components: [COMP-001, COMP-002]
+    adrs: [ADR-0012, ADR-0011]
+    tests:
+      - TestEdge_UnaryResponse_OpenAIShape
+      - TestEdge_UnaryResponse_EdgeGeneratedFields
+    status: partial
+
+  - req: FR-019
+    description: "Edge streams real OpenAI chunks + [DONE]; upstream sets stream_options.include_usage and parses usage; graceful 0 if absent."
+    capabilities: [CAP-001]
+    contexts: [CTX-001]
+    components: [COMP-001, COMP-002, COMP-005]
+    adrs: [ADR-0012, ADR-0013, ADR-0009]
+    tests:
+      - TestEdge_Streaming_OpenAIChunksAndDone
+      - TestEdge_Streaming_MissingUsage_GracefulZero
+    status: partial
+
+  - req: FR-020
+    description: "Edge maps own and upstream errors to the OpenAI error shape {error:{message,type,code}} for 400/401/429/502/503."
+    capabilities: [CAP-001]
+    contexts: [CTX-001]
+    components: [COMP-001, COMP-002]
+    adrs: [ADR-0012, ADR-0011]
+    tests:
+      - TestEdge_GatewayError_OpenAIShape
+      - TestEdge_UpstreamError_MappedToOpenAIShape
+    status: partial
+
+  - req: FR-021
+    description: "Real OpenAI-compatible HTTP upstream adapter (Ollama/OpenAI via config); optional bearer auth; mock upstream emits the real OpenAI shape."
+    capabilities: [CAP-001]
+    contexts: [CTX-001]
+    components: [COMP-005]
+    adrs: [ADR-0013, ADR-0009, ADR-0010]
+    tests:
+      - TestUpstream_OpenAIAdapter_UnaryMapping
+      - TestUpstream_OpenAIAdapter_BearerAuthOptional
+      - TestUpstream_MockUpstream_EmitsOpenAIShape
+    status: partial
+
   - req: NFR-001
     description: "Gateway p95 overhead <= 20ms under sustained load, excluding provider latency."
     capabilities: [CAP-001]
@@ -328,6 +385,24 @@ links:
     contexts: [CTX-004]
     components: [COMP-016, COMP-017, COMP-018]
     adrs: [ADR-0007]
+    tests: []
+    status: covered
+
+  - req: CON-007
+    description: "OpenAI-compatible endpoint scope limited to POST /v1/chat/completions only (completions/embeddings/models are non-goals)."
+    capabilities: [CAP-001]
+    contexts: [CTX-001]
+    components: [COMP-001]
+    adrs: [ADR-0012]
+    tests: []
+    status: covered
+
+  - req: CON-008
+    description: "Documented OpenAI non-goals: function calling, multimodal, n>1, API-key validation, budgets/cost, multi-provider routing; liberal-accept but only the modeled subset honoured."
+    capabilities: [CAP-001]
+    contexts: [CTX-001]
+    components: [COMP-001, COMP-002, COMP-005]
+    adrs: [ADR-0012, ADR-0013]
     tests: []
     status: covered
 

@@ -67,3 +67,15 @@ resolved:
     resolved_by: ADR-0011
     resolution_label: openapi_contract_first_oapi_codegen
     date: 2026-06-25
+
+  - id: DEC-012
+    question: "What OpenAI-compatible wire contract does the edge expose (endpoint scope, supported/ignored/unsupported request fields, response/stream/error shape)?"
+    resolved_by: ADR-0012
+    resolution_label: openai_compatible_v1_subset_liberal_accept
+    date: 2026-06-26
+
+  - id: DEC-013
+    question: "How does the upstream provider adapter speak to a real OpenAI-compatible backend (wire shape, streaming usage, upstream auth, configuration/routing)?"
+    resolved_by: ADR-0013
+    resolution_label: openai_wire_adapter_ollama_primary
+    date: 2026-06-26

@@ -394,6 +394,139 @@ functional:
         kind: negative
         test: TestLogging_PanicLoggedAtError
 
+  - id: FR-017
+    statement: >
+      Edge accepts the real OpenAI POST /v1/chat/completions request liberally:
+      modeled fields (model, messages[{role,content}], stream, temperature, top_p,
+      max_tokens, stop) are forwarded; unknown fields (seed, user, penalties,
+      logit_bias, response_format, n, logprobs) are accepted-but-ignored
+      (additionalProperties) and never cause a 400.
+    source: [US-001, US-003]
+    acceptance:
+      - id: AC-053
+        given: a valid OpenAI request body with model and messages[{role,content}]
+        when: API Client sends POST /v1/chat/completions
+        then: gateway accepts it and forwards model, messages, stream, temperature, top_p, max_tokens, stop to the upstream as canonical fields
+        kind: happy
+        adr: ADR-0012
+        test: TestEdge_OpenAIRequest_Accepted
+      - id: AC-054
+        given: an OpenAI request that additionally carries unknown fields (seed, user, presence_penalty, frequency_penalty, logit_bias, response_format, n, logprobs)
+        when: API Client sends POST /v1/chat/completions
+        then: gateway returns 200 (does not 400); the unknown fields are ignored and not forwarded upstream
+        kind: boundary
+        adr: ADR-0012
+        test: TestEdge_UnknownFields_IgnoredNot400
+      - id: AC-055
+        given: a request whose messages contains an unsupported content shape (array/multimodal) or n>1
+        when: API Client sends POST /v1/chat/completions
+        then: gateway returns an OpenAI-shaped 400 error (documented non-goal), without contacting the provider
+        kind: negative
+        adr: ADR-0012
+        test: TestEdge_UnsupportedContent_Returns400
+
+  - id: FR-018
+    statement: >
+      Edge returns the real OpenAI unary response shape
+      {id:"chatcmpl-…",object:"chat.completion",created,model,
+      choices:[{index:0,message:{role:"assistant",content},finish_reason}],
+      usage:{prompt_tokens,completion_tokens,total_tokens}} with id/created/object
+      generated at the edge and exactly one choice.
+    source: [US-001]
+    acceptance:
+      - id: AC-056
+        given: a non-streaming OpenAI request, provider responds 200 with content and usage
+        when: API Client sends POST /v1/chat/completions
+        then: gateway returns 200 with object "chat.completion", an edge-generated id prefixed "chatcmpl-", a created timestamp, a single choices[0] with message.role "assistant" and finish_reason, and a usage object
+        kind: happy
+        adr: ADR-0012
+        test: TestEdge_UnaryResponse_OpenAIShape
+      - id: AC-057
+        given: a non-streaming OpenAI request
+        when: gateway maps the canonical Response to the edge response
+        then: id/created/object are generated at the edge (not passed through from upstream); system_fingerprint is omitted
+        kind: boundary
+        adr: ADR-0012
+        test: TestEdge_UnaryResponse_EdgeGeneratedFields
+
+  - id: FR-019
+    statement: >
+      Edge streams real OpenAI SSE chunks
+      {object:"chat.completion.chunk",choices:[{index:0,delta:{…},finish_reason}]}
+      terminated by `data: [DONE]`; the upstream adapter sets
+      stream_options.include_usage=true and parses the usage chunk for metering,
+      recording 0/uncounted gracefully when upstream omits usage.
+    source: [US-002]
+    acceptance:
+      - id: AC-058
+        given: a request with "stream":true, provider streams deltas then a usage chunk
+        when: API Client sends POST /v1/chat/completions
+        then: 'gateway returns Content-Type text/event-stream, forwards object "chat.completion.chunk" events with choices[0].delta, and terminates with a literal "data: [DONE]"'
+        kind: happy
+        adr: ADR-0012
+        test: TestEdge_Streaming_OpenAIChunksAndDone
+      - id: AC-059
+        given: a streaming request, the upstream omits the usage chunk (ignores stream_options.include_usage)
+        when: the stream completes
+        then: the stream ends normally with [DONE]; metering records the usage event with zero/uncounted tokens without error and without blocking the stream
+        kind: error
+        adr: ADR-0013
+        test: TestEdge_Streaming_MissingUsage_GracefulZero
+
+  - id: FR-020
+    statement: >
+      Edge maps the gateway's own errors (400/401/429/502/503) and mapped upstream
+      errors to the OpenAI error shape {error:{message,type,code}}.
+    source: [US-001]
+    acceptance:
+      - id: AC-060
+        given: a request that triggers a gateway 429 (rate limit) or 503 (backpressure/breaker)
+        when: API Client sends POST /v1/chat/completions
+        then: gateway returns the corresponding status with body {error:{message,type,code}} in the OpenAI error shape
+        kind: error
+        adr: ADR-0012
+        test: TestEdge_GatewayError_OpenAIShape
+      - id: AC-061
+        given: the provider returns a non-2xx upstream error (e.g. 500) with retries exhausted
+        when: API Client sends POST /v1/chat/completions
+        then: gateway returns 502 with body {error:{message,type,code}} mapped to the OpenAI error shape
+        kind: error
+        adr: ADR-0012
+        test: TestEdge_UpstreamError_MappedToOpenAIShape
+
+  - id: FR-021
+    statement: >
+      A real OpenAI-compatible HTTP provider adapter maps the canonical Request to
+      an OpenAI /v1/chat/completions request and parses real choices[]/delta/[DONE]/
+      usage back to canonical types; it is configured by GATEWAY_UPSTREAM_URL +
+      optional GATEWAY_UPSTREAM_API_KEY + GATEWAY_UPSTREAM_MODEL, sends a bearer
+      token only when the key is non-empty (omitted for Ollama), and is registered
+      for the configured model. The in-process mock upstream emits the real OpenAI
+      shape and the interface-level mock provider is retained.
+    source: [US-001, US-003]
+    acceptance:
+      - id: AC-062
+        given: the adapter configured with GATEWAY_UPSTREAM_URL of an OpenAI-compatible backend and GATEWAY_UPSTREAM_MODEL
+        when: the gateway calls Infer with a canonical Request
+        then: the adapter POSTs an OpenAI /v1/chat/completions request (model, messages, temperature, top_p, max_tokens, stop) and maps choices[0].message.content + usage back into the canonical Response
+        kind: happy
+        adr: ADR-0013
+        test: TestUpstream_OpenAIAdapter_UnaryMapping
+      - id: AC-063
+        given: GATEWAY_UPSTREAM_API_KEY is empty (Ollama)
+        when: the adapter builds the upstream request
+        then: no Authorization header is sent; with a non-empty key the adapter sends Authorization Bearer <key>
+        kind: boundary
+        adr: ADR-0013
+        test: TestUpstream_OpenAIAdapter_BearerAuthOptional
+      - id: AC-064
+        given: the in-process mock upstream
+        when: a unit or load test drives Infer/InferStream through the adapter
+        then: the mock emits the real OpenAI unary shape and SSE chunk shape (with [DONE] and a usage chunk), exercising the real mapping
+        kind: happy
+        adr: ADR-0013
+        test: TestUpstream_MockUpstream_EmitsOpenAIShape
+
 non_functional:
   - id: NFR-001
     category: performance
@@ -569,3 +702,20 @@ constraints:
       Writing usage metrics to Postgres is performed exclusively asynchronously (outside
       the hot HTTP handler path). Synchronous writes on the request path are prohibited.
     source: docs/requirements.md §7, US-015
+
+  - id: CON-007
+    type: technical
+    statement: >
+      OpenAI-compatible endpoint scope is limited to POST /v1/chat/completions only.
+      /v1/completions, /v1/embeddings, and /v1/models are explicit non-goals in v1.
+    source: ADR-0012, Variant B contract
+
+  - id: CON-008
+    type: technical
+    statement: >
+      Documented OpenAI non-goals: tools/functions/tool_choice (function calling),
+      multimodal content (array/image message parts), n>1 (single choice only),
+      client API-key validation, budgets/cost accounting, and multi-provider routing
+      by model prefix. Requests are accepted liberally (additionalProperties) but only
+      the modeled subset is honoured and forwarded.
+    source: ADR-0012, ADR-0013, Variant B contract

@@ -6,16 +6,23 @@ capabilities:
   - id: CAP-001
     name: Inference proxying
     description: >
-      Accepting inference requests (POST /v1/chat/completions), routing to the
-      appropriate provider by the model field, proxying the response (plain JSON or
-      SSE stream), caching identical requests in Redis, retrying with backoff on
-      transient provider errors, cancelling the upstream call when the client
-      connection closes.
+      Accepting OpenAI-compatible inference requests (POST /v1/chat/completions) in
+      the real OpenAI wire format — liberal-accept of unknown fields
+      (additionalProperties), the modeled subset (model, messages, stream,
+      temperature, top_p, max_tokens, stop) forwarded — routing to the configured
+      provider by the model field, and returning the real OpenAI response shape:
+      unary chat.completion (edge-generated id/created/object, single choice, usage)
+      or chat.completion.chunk SSE stream terminated by [DONE]. Errors use the OpenAI
+      error envelope {error:{message,type,code}}. Backed by a real OpenAI-compatible
+      HTTP upstream adapter (Ollama primary; OpenAI/vLLM/LM Studio via config; mock
+      upstream emits the same OpenAI shape). Caches identical requests in Redis,
+      retries with backoff on transient provider errors, cancels the upstream call
+      when the client connection closes.
     events: [EVT-001, EVT-002, EVT-006, EVT-014, EVT-015]
     commands: [CMD-001, CMD-002]
     aggregates: [AGG-001]
     stories: [US-001, US-002, US-003, US-004, US-006, US-007]
-    requirements: [FR-001, FR-002, FR-003, FR-005, FR-006, NFR-001, NFR-004, NFR-008]
+    requirements: [FR-001, FR-002, FR-003, FR-005, FR-006, FR-017, FR-018, FR-019, FR-020, FR-021, NFR-001, NFR-004, NFR-008]
 
   - id: CAP-002
     name: Rate limiting and backpressure

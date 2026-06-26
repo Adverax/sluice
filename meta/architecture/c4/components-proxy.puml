@@ -46,8 +46,16 @@
 '           provider => fast-fail 503 + Retry-After.
 ' ADR-0009  Provider is a Go interface with TWO methods:
 '           Infer(ctx,req) (unary) and InferStream(ctx,req) (<-chan Chunk, error)
-'           for SSE streaming. COMP-005 is the interface + mock adapter (ACL to
+'           for SSE streaming. COMP-005 is the interface + adapters (ACL to
 '           EXT-001 LlmProvider); adapters translate wire format + normalize usage.
+' ADR-0012  Edge speaks the REAL OpenAI /v1/chat/completions wire (liberal-accept
+'           additionalProperties; edge-generated id/created/object; single choice;
+'           chat.completion.chunk SSE + [DONE]; {error:{message,type,code}}). The
+'           OpenAI shape is an EDGE concern; only canonical types cross COMP-005.
+' ADR-0013  COMP-005 ships a real OpenAI-wire HTTP adapter configured by
+'           GATEWAY_UPSTREAM_URL/API_KEY/MODEL (Ollama primary, no key;
+'           OpenAI/vLLM/LM Studio via config; stream_options.include_usage for
+'           streaming metering). Mock upstream emits the same OpenAI shape.
 ' ADR-0010  CacheRepository (COMP-004) is the ACL over go-redis/v9 to Redis
 '           (EXT-002). Cache TTL 5min default + X-Cache-TTL per-request override
 '           (ADR-0004). Streaming requests are NOT cached.
@@ -63,7 +71,7 @@ title "Components: Proxy Context (CTX-001)"
 
 Person(client, "API Client", "Sends inference requests (unary or SSE streaming)")
 
-System_Ext(llmProvider, "LLM Provider (mock)", "EXT-001")
+System_Ext(llmProvider, "LLM Provider (OpenAI-compatible: Ollama/OpenAI/vLLM/LM Studio; mock default)", "EXT-001")
 ContainerDb_Ext(redis, "Redis", "EXT-002\ngo-redis/v9 cache backend")
 
 ' --- Cross-context: Resilience (CTX-002) ---

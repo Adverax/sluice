@@ -47,6 +47,29 @@ Intake queue. One line each; NFRs marked with a metric. Downstream
 # processed: 2026-06-24 → TERM-001, FR-004
 - API key parsed from `Authorization` header as the rate-limit / usage key only (no validation backend). Source: vision Non-goals.
 
+## Delta — 2026-06-26 — OpenAI compatibility (Variant B; ADR-0012, ADR-0013)
+
+# processed: 2026-06-26 → FR-017, CON-007, CON-008
+- Edge accepts the REAL OpenAI `POST /v1/chat/completions` request liberally: supported & forwarded fields (`model`, `messages[{role,content}]`, `stream`, `temperature`, `top_p`, `max_tokens`, `stop`); accepted-but-ignored unknown fields (`seed`, `user`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `response_format`, `n`, `logprobs`) via `additionalProperties` — never 400. Source: Variant B contract.
+
+# processed: 2026-06-26 → FR-018
+- Edge returns the REAL OpenAI unary response shape `{id:"chatcmpl-…",object:"chat.completion",created,model,choices:[{index:0,message:{role,content},finish_reason}],usage:{...}}`; `id`/`created`/`object` generated at the edge; single choice; `system_fingerprint` omitted. Source: Variant B contract.
+
+# processed: 2026-06-26 → FR-019
+- Edge streams REAL OpenAI SSE chunks `{object:"chat.completion.chunk",choices:[{index:0,delta,finish_reason}]}` then `data: [DONE]`; upstream adapter sets `stream_options.include_usage=true` and parses the usage chunk for metering; uncounted-graceful when upstream omits usage. Source: Variant B contract.
+
+# processed: 2026-06-26 → FR-020
+- Edge maps own and upstream errors to the OpenAI error shape `{error:{message,type,code}}` for 400/401/429/502/503. Source: Variant B contract.
+
+# processed: 2026-06-26 → FR-021
+- Real OpenAI-compatible HTTP upstream provider adapter: canonical→OpenAI request, parse real `choices[]`/`delta`/`[DONE]`/`usage`; configured by `GATEWAY_UPSTREAM_URL` + optional `GATEWAY_UPSTREAM_API_KEY` + `GATEWAY_UPSTREAM_MODEL`; Ollama primary (no key), OpenAI/vLLM/LM Studio via config; bearer auth omitted when key empty; mock upstream emits the real OpenAI shape; interface-level mock retained. Source: Variant B contract.
+
+# processed: 2026-06-26 → CON-007
+- Endpoint scope: only `POST /v1/chat/completions`. `/v1/completions`, `/v1/embeddings`, `/v1/models` are non-goals. Source: Variant B contract.
+
+# processed: 2026-06-26 → CON-008
+- Non-goals: tools/functions/tool_choice (function calling), multimodal content (array/images), `n>1`, API-key validation, budgets/cost, multi-provider routing by model prefix. Source: Variant B contract.
+
 ## Non-functional (NFR)
 
 # processed: 2026-06-24 → NFR-001
