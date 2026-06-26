@@ -95,26 +95,35 @@ func run() error {
 	// than per-request — and is now genuinely EXERCISED rather than discarded.
 	httpClient := newUpstreamClient(cfg.Upstream.Timeout)
 
-	// Resolve the mock LLM upstream URL (CARD-013). If GATEWAY_UPSTREAM_URL is set
-	// we point the provider at that external endpoint; otherwise we start an
-	// in-process mock upstream on a loopback side-listener and target it. Either
-	// way the gateway reaches the upstream over REAL HTTP through the pooled
-	// client, so pooling + real ctx-cancellation are exercised end-to-end. This
-	// is still a MOCK upstream (no real OpenAI/Anthropic — a v1 non-goal).
+	// Resolve the upstream base URL (CARD-016, ADR-0013). If GATEWAY_UPSTREAM_URL
+	// is set we point the OpenAI-compatible adapter at that external endpoint
+	// (e.g. Ollama http://localhost:11434/v1); otherwise we start an in-process
+	// mock upstream — now emitting the REAL OpenAI shape — on a loopback
+	// side-listener and target it. Either way the gateway reaches the upstream
+	// over REAL HTTP through the pooled client, so pooling + real ctx-cancellation
+	// are exercised end-to-end. The base URL includes the /v1 segment; the adapter
+	// POSTs to <baseURL>/chat/completions.
 	upstreamURL, stopMockUpstream, err := resolveUpstream(cfg.Upstream, logger)
 	if err != nil {
 		return err
 	}
 
-	// Model router (FR-002). The "mock" model is served by the HTTPProvider over
-	// real HTTP (CARD-013); the in-process provider.Mock remains for fast unit
+	// Model router (FR-002). The configured model (GATEWAY_UPSTREAM_MODEL —
+	// "mock" by default for the in-process mock, "llama3.2" for an external
+	// backend) is served by the OpenAI-compatible HTTPProvider over real HTTP
+	// (CARD-016). The adapter sends an upstream bearer key only when configured
+	// (Ollama needs none). The in-process provider.Mock remains for fast unit
 	// tests elsewhere but is no longer on the RUNNING gateway's path.
+	upstreamModel := cfg.Upstream.Model
 	router := proxy.NewRouter()
-	router.Register("mock", provider.NewHTTP(httpClient, upstreamURL))
+	router.Register(upstreamModel, provider.NewHTTP(httpClient, upstreamURL,
+		provider.WithAPIKey(cfg.Upstream.APIKey),
+		provider.WithModel(upstreamModel),
+	))
 	// Seed breaker_state{provider} to closed (0) at registration so the series
 	// is always present in GET /metrics, even for a provider that has never
 	// tripped its breaker (AC-048: all six metrics must emit on startup).
-	met.SetBreakerState("mock", metrics.BreakerStateClosed)
+	met.SetBreakerState(upstreamModel, metrics.BreakerStateClosed)
 
 	// Health/readiness framework (FR-008/FR-009) with REAL dependency checkers.
 	// Use the dedicated per-check timeout (cfg.HealthCheckTimeout) rather than
@@ -343,16 +352,17 @@ func breakerStateValue(s gobreaker.State) float64 {
 	}
 }
 
-// resolveUpstream decides the mock LLM upstream URL the HTTPProvider targets
-// (CARD-013). When cfg.URL is set it is returned verbatim with a nil stop
-// function (the upstream is external — the gateway owns nothing to shut down).
-// When cfg.URL is empty it starts an in-process mock upstream on a loopback
-// side-listener (cfg.MockUpstreamAddr, default 127.0.0.1:0), returns the
-// resolved http://host:port URL, and a stop function that gracefully shuts the
-// side-server down (wired as a lifecycle OnShutdown hook).
+// resolveUpstream decides the OpenAI-compatible upstream base URL the
+// HTTPProvider targets (CARD-016). When cfg.URL is set it is returned verbatim
+// (it already includes the /v1 segment) with a nil stop function (the upstream
+// is external — the gateway owns nothing to shut down). When cfg.URL is empty it
+// starts an in-process mock upstream — emitting the real OpenAI shape — on a
+// loopback side-listener (cfg.MockUpstreamAddr, default 127.0.0.1:0), returns
+// the resolved http://host:port/v1 URL, and a stop function that gracefully
+// shuts the side-server down (wired as a lifecycle OnShutdown hook).
 func resolveUpstream(cfg config.Upstream, logger *slog.Logger) (string, func(context.Context) error, error) {
 	if cfg.URL != "" {
-		logger.Info("using external mock upstream", slog.String("url", cfg.URL))
+		logger.Info("using external OpenAI-compatible upstream", slog.String("url", cfg.URL))
 		return cfg.URL, nil, nil
 	}
 
@@ -371,7 +381,10 @@ func resolveUpstream(cfg config.Upstream, logger *slog.Logger) (string, func(con
 		}
 	}()
 
-	url := "http://" + ln.Addr().String()
+	// The mock serves POST /v1/chat/completions; the adapter POSTs to
+	// <baseURL>/chat/completions, so the base URL must include the /v1 segment
+	// (mirroring a real Ollama/OpenAI base URL like http://localhost:11434/v1).
+	url := "http://" + ln.Addr().String() + "/v1"
 	logger.Info("started in-process mock upstream", slog.String("addr", ln.Addr().String()), slog.String("url", url))
 
 	stop := func(ctx context.Context) error {

@@ -11,8 +11,19 @@ import (
 	"time"
 )
 
-// TestMockUpstreamHandler_Unary covers the JSON (non-stream) endpoint: defaults,
-// custom content/usage, and the configured error status.
+// decodeUnary parses an OpenAI unary chat.completion body into the adapter's
+// private oaiResponse for assertions.
+func decodeUnary(t *testing.T, body *bufio.Reader) oaiResponse {
+	t.Helper()
+	var or oaiResponse
+	if err := json.NewDecoder(body).Decode(&or); err != nil {
+		t.Fatalf("decode unary: %v", err)
+	}
+	return or
+}
+
+// TestMockUpstreamHandler_Unary covers the OpenAI JSON (non-stream) endpoint:
+// defaults, custom content/usage, and the configured error status.
 func TestMockUpstreamHandler_Unary(t *testing.T) {
 	t.Parallel()
 
@@ -59,28 +70,44 @@ func TestMockUpstreamHandler_Unary(t *testing.T) {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.wantStatus)
 			}
 			if tc.wantStatus != http.StatusOK {
+				// Error path must carry the OpenAI error envelope.
+				var env oaiErrorEnvelope
+				if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+					t.Fatalf("decode error envelope: %v", err)
+				}
+				if env.Error.Message == "" {
+					t.Fatal("error envelope missing error.message")
+				}
 				return
 			}
-			var wr wireResponse
-			if err := json.NewDecoder(resp.Body).Decode(&wr); err != nil {
-				t.Fatalf("decode: %v", err)
+
+			or := decodeUnary(t, bufio.NewReader(resp.Body))
+			if len(or.Choices) == 0 {
+				t.Fatal("response has no choices")
 			}
-			if wr.Content != tc.wantContent {
-				t.Fatalf("content = %q, want %q", wr.Content, tc.wantContent)
+			if got := or.Choices[0].Message.Content; got != tc.wantContent {
+				t.Fatalf("content = %q, want %q", got, tc.wantContent)
 			}
-			if wr.Model != "mock" {
-				t.Fatalf("model = %q, want %q (echoed from request)", wr.Model, "mock")
+			if or.Choices[0].Message.Role != "assistant" {
+				t.Fatalf("role = %q, want assistant", or.Choices[0].Message.Role)
 			}
-			if tc.opts.Usage.TotalTokens != 0 && wr.Usage.TotalTokens != tc.opts.Usage.TotalTokens {
-				t.Fatalf("usage.TotalTokens = %d, want %d", wr.Usage.TotalTokens, tc.opts.Usage.TotalTokens)
+			if or.Choices[0].FinishReason != defaultMockFinishReason {
+				t.Fatalf("finish_reason = %q, want %q", or.Choices[0].FinishReason, defaultMockFinishReason)
+			}
+			if or.Model != "mock" {
+				t.Fatalf("model = %q, want %q (echoed from request)", or.Model, "mock")
+			}
+			if tc.opts.Usage.TotalTokens != 0 && or.Usage.TotalTokens != tc.opts.Usage.TotalTokens {
+				t.Fatalf("usage.TotalTokens = %d, want %d", or.Usage.TotalTokens, tc.opts.Usage.TotalTokens)
 			}
 		})
 	}
 }
 
-// TestMockUpstreamHandler_Stream covers the SSE endpoint: it emits the requested
-// number of delta events, a terminal Done event with usage, and a [DONE]
-// sentinel.
+// TestMockUpstreamHandler_Stream covers the OpenAI SSE endpoint: it emits the
+// requested number of chat.completion.chunk delta events, a final chunk with a
+// finish_reason, a trailing usage chunk (when include_usage is requested), and
+// the [DONE] sentinel.
 func TestMockUpstreamHandler_Stream(t *testing.T) {
 	t.Parallel()
 
@@ -91,7 +118,7 @@ func TestMockUpstreamHandler_Stream(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	body := strings.NewReader(`{"model":"mock","stream":true,"messages":[]}`)
+	body := strings.NewReader(`{"model":"mock","stream":true,"stream_options":{"include_usage":true},"messages":[]}`)
 	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", body)
 	if err != nil {
 		t.Fatalf("POST failed: %v", err)
@@ -103,7 +130,7 @@ func TestMockUpstreamHandler_Stream(t *testing.T) {
 	}
 
 	var deltas int
-	var sawDone, sawSentinel bool
+	var sawFinish, sawUsage, sawSentinel bool
 	var content string
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
@@ -116,19 +143,27 @@ func TestMockUpstreamHandler_Stream(t *testing.T) {
 			sawSentinel = true
 			continue
 		}
-		var ev wireStreamEvent
+		var ev oaiStreamEvent
 		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
 			t.Fatalf("decode event %q: %v", payload, err)
 		}
-		if ev.Done {
-			sawDone = true
+		if ev.Usage != nil {
+			sawUsage = true
 			if ev.Usage.TotalTokens != 4 {
-				t.Fatalf("terminal usage.TotalTokens = %d, want 4", ev.Usage.TotalTokens)
+				t.Fatalf("trailing usage.TotalTokens = %d, want 4", ev.Usage.TotalTokens)
 			}
+		}
+		if len(ev.Choices) == 0 {
 			continue
 		}
-		deltas++
-		content += ev.Content
+		if ev.Choices[0].FinishReason != "" {
+			sawFinish = true
+			continue
+		}
+		if d := ev.Choices[0].Delta.Content; d != "" {
+			deltas++
+			content += d
+		}
 	}
 	if scanner.Err() != nil {
 		t.Fatalf("scan error: %v", scanner.Err())
@@ -139,8 +174,11 @@ func TestMockUpstreamHandler_Stream(t *testing.T) {
 	if content != "abcd" {
 		t.Fatalf("reassembled content = %q, want %q", content, "abcd")
 	}
-	if !sawDone {
-		t.Fatal("missing terminal Done event")
+	if !sawFinish {
+		t.Fatal("missing final chunk with finish_reason")
+	}
+	if !sawUsage {
+		t.Fatal("missing trailing usage chunk")
 	}
 	if !sawSentinel {
 		t.Fatal("missing [DONE] sentinel")
