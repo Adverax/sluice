@@ -129,8 +129,9 @@ type oaiResponse struct {
 }
 
 // oaiStreamChoice is one streamed choice: choices[i].delta.{role,content} +
-// finish_reason. The delta and finish_reason fields are pointers/optional so an
-// absent field is distinguishable from a zero value.
+// finish_reason. finish_reason is null on intermediate chunks and set on the
+// final one; we only consume delta.content (finish_reason is not relayed to the
+// canonical Chunk today).
 type oaiStreamChoice struct {
 	Index        int      `json:"index"`
 	Delta        oaiDelta `json:"delta"`

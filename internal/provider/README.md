@@ -40,35 +40,47 @@ selects on `ctx.Done()` at every send and closes the channel via `defer` (no gor
 Real adapters (OpenAI, Anthropic) are deferred; they will implement `Provider` and
 translate wire-format ↔ canonical types here.
 
-## HTTPProvider (CARD-013)
+## HTTPProvider (CARD-013, CARD-016)
 
-`HTTPProvider` is the production wiring of the ACL: a `Provider` that reaches a mock LLM
-upstream over **real HTTP** through an **injected** `*http.Client`, so the tuned client's
-connection pooling (ADR-0010, NFR-004) is genuinely exercised rather than discarded.
+`HTTPProvider` is the production wiring of the ACL: a `Provider` that reaches a **real
+OpenAI-compatible** upstream over **real HTTP** through an **injected** `*http.Client`, so
+the tuned client's connection pooling (ADR-0010, NFR-004) is genuinely exercised rather than
+discarded. It speaks the real OpenAI `/v1/chat/completions` wire (ADR-0012/ADR-0013), so the
+configured backend can be **Ollama** (default showcase, no key), OpenAI, vLLM, or LM Studio.
 
-- `NewHTTP(client *http.Client, baseURL string)` — the client is injected (no package
-  transport); pooling + the explicit total timeout are owned by `cmd/gateway`.
-- `Infer` POSTs canonical-mapped JSON to `/v1/chat/completions`, maps the upstream JSON
-  response → canonical `Response` (incl. `Usage`).
-- `InferStream` requests the SSE variant and reads the `text/event-stream` body
-  incrementally, emitting one canonical `Chunk` per `data:` event and a terminal `Done`
-  chunk with `Usage`; the reader goroutine selects on `ctx.Done()` and closes the body +
-  channel on exit (no leak).
-- Every call builds its request with `http.NewRequestWithContext`, so a cancelled ctx
-  aborts the in-flight upstream call and surfaces a ctx-wrapping error (FR-003).
-- Non-2xx upstream statuses become `*StatusError` (5xx retryable, 4xx not), keeping the
-  resilience layer provider-agnostic.
+- `NewHTTP(client *http.Client, baseURL string, opts…)` — the client is injected (no package
+  transport); pooling + the explicit total timeout are owned by `cmd/gateway`. `baseURL`
+  includes the `/v1` segment; `WithAPIKey` and `WithModel` configure optional bearer auth and
+  the model. The request is sent to `<baseURL>/chat/completions`.
+- `Infer` POSTs the canonical request as an OpenAI request, then maps the OpenAI response
+  (`choices[0].message.content` + `finish_reason` + `usage`) → canonical `Response`.
+- `InferStream` requests the SSE variant with `stream_options.include_usage=true` and reads
+  the `text/event-stream` body incrementally, emitting one canonical `Chunk` per
+  `chat.completion.chunk` `delta.content` and a terminal `Done` chunk with `Usage` parsed from
+  the trailing usage chunk; it stops on a literal `data: [DONE]`. If the backend omits the
+  usage chunk, the stream ends gracefully with zero usage. The reader goroutine selects on
+  `ctx.Done()` and closes the body + channel on exit (no leak).
+- Every call builds its request with `http.NewRequestWithContext`, so a cancelled ctx aborts
+  the in-flight upstream call and surfaces a ctx-wrapping error (FR-003).
+- Non-2xx upstream statuses become `*StatusError` (5xx retryable, 4xx not), parsing the OpenAI
+  `{error:{message,type,code}}` envelope into the message — keeping the resilience layer
+  provider-agnostic.
+- `Authorization: Bearer <key>` is sent only when a non-empty key is configured (omitted for
+  Ollama).
 
-The upstream wire types (`wireRequest`/`wireResponse`/`wireStreamEvent`) are deliberately
-distinct from the canonical types and never cross the `Provider` boundary (ADR-0009).
+The upstream wire types (`oaiRequest`/`oaiResponse`/`oaiStreamEvent`/`oaiErrorEnvelope`) are
+deliberately private, distinct from the canonical types, and never cross the `Provider`
+boundary (ADR-0009).
 
-## Mock upstream (CARD-013)
+## Mock upstream (CARD-013, CARD-016)
 
-`MockUpstreamHandler(MockUpstreamOptions)` returns an `http.Handler` implementing the mock
-upstream wire API consumed by `HTTPProvider`. It is the reproducible mock served over real
-HTTP — usable in tests (`httptest.NewServer`) and run in-process by `cmd/gateway` on a
-loopback side-listener when `GATEWAY_UPSTREAM_URL` is unset. Controllable `Latency`,
-`FailStatus` (error-rate), and `StreamChunks`; serves both the JSON and SSE paths.
+`MockUpstreamHandler(MockUpstreamOptions)` returns an `http.Handler` that emits the **real
+OpenAI wire shape** (unary `chat.completion` + SSE `chat.completion.chunk` deltas + a usage
+chunk + `data: [DONE]`) consumed by `HTTPProvider`. It is the reproducible mock served over
+real HTTP — usable in tests (`httptest.NewServer`) and run in-process by `cmd/gateway` on a
+loopback side-listener when `GATEWAY_UPSTREAM_URL` is unset (the default `make up` upstream, so
+the demo stays fast). Controllable `Latency`, `FailStatus` (error-rate), `StreamChunks`, and
+`OmitStreamUsage` (models a backend ignoring `include_usage`); serves both the JSON and SSE paths.
 
 ## See also
 

@@ -341,12 +341,12 @@ func TestUpstream_OpenAIAdapter_UnaryMapping(t *testing.T) {
 	}
 }
 
-// TestUpstream_OpenAIAdapter_UnaryMapping_PassesModelAndStop verifies the model
-// passes through as-is when set on the Request, and that a request can carry the
-// modeled fields without the adapter dropping them (CON-007/CON-008). It also
-// asserts the request marshals top_p/stop when the canonical Request supports
-// them in future — today the adapter forwards model/messages/temperature/
-// max_tokens, so we assert those round-trip.
+// TestUpstream_OpenAIAdapter_RequestModelOverride verifies the model passes
+// through as-is when set on the canonical Request (winning over the WithModel
+// fallback), and that the adapter forwards the modeled fields
+// (model/messages/temperature/max_tokens) without dropping them. top_p/stop are
+// modeled in the wire struct but not yet supplied by the canonical Request
+// (CARD-017 adds them at the edge), so they are not asserted here.
 func TestUpstream_OpenAIAdapter_RequestModelOverride(t *testing.T) {
 	t.Parallel()
 
