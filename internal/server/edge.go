@@ -79,8 +79,8 @@ func toCanonicalRequest(body api.ChatCompletionRequest) (provider.Request, *edge
 		p := float64(*body.TopP)
 		req.TopP = &p
 	}
-	if body.Stop != nil && len(*body.Stop) > 0 {
-		req.Stop = append([]string(nil), (*body.Stop)...)
+	if body.Stop != nil {
+		req.Stop = normalizeStop(body.Stop)
 	}
 	for _, m := range body.Messages {
 		req.Messages = append(req.Messages, provider.Message{
@@ -105,6 +105,25 @@ func rejectUnsupported(body api.ChatCompletionRequest) *edgeError {
 				code:       "unsupported_value",
 			}
 		}
+	}
+	return nil
+}
+
+// normalizeStop converts the generated oneOf Stop union (string | []string) into
+// the canonical []string used by provider.Request. A scalar string is wrapped in
+// a single-element slice; an array is returned as-is; an empty array returns nil
+// so the upstream adapter treats it as absent (ADR-0009).
+func normalizeStop(s *api.ChatCompletionRequest_Stop) []string {
+	if s == nil {
+		return nil
+	}
+	// Try array form first (Stop1).
+	if arr, err := s.AsChatCompletionRequestStop1(); err == nil && len(arr) > 0 {
+		return append([]string(nil), arr...)
+	}
+	// Try scalar string form (Stop0).
+	if str, err := s.AsChatCompletionRequestStop0(); err == nil && str != "" {
+		return []string{str}
 	}
 	return nil
 }

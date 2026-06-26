@@ -684,10 +684,12 @@ func (s *Server) Handler(mux *http.ServeMux) http.Handler {
 		openapi3filter.OnErr(func(_ context.Context, w http.ResponseWriter, status int, _ openapi3filter.ErrCode, err error) {
 			// A schema-validation failure (e.g. unknown enum role, missing required
 			// field, array content) is rendered as an OpenAI-shaped error envelope
-			// so unmodified OpenAI SDKs parse it (ADR-0012 §7, FR-020).
+			// so unmodified OpenAI SDKs parse it (ADR-0012 §7, FR-020). The raw
+			// kin-openapi schema dump is NOT forwarded to avoid leaking internal
+			// schema details; a concise message is used instead.
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(status)
-			_ = json.NewEncoder(w).Encode(openAIError(err.Error(), "invalid_request_error", "validation_error"))
+			_ = json.NewEncoder(w).Encode(openAIError("the request body did not conform to the schema", "invalid_request_error", "validation_error"))
 		}),
 		// Only validate requests; leave response validation off (not needed and
 		// adds per-request buffering overhead — strict mode can be enabled later).

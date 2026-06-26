@@ -187,10 +187,15 @@ components:
           type: number
           description: Optional nucleus-sampling probability mass.
         stop:
-          type: array
-          description: Optional stop sequences that end generation.
-          items:
-            type: string
+          description: |
+            Optional stop sequences that end generation. Accepts a single
+            string or an array of strings, matching the OpenAI wire contract.
+          nullable: true
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
 
     Usage:
       type: object

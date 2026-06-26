@@ -70,6 +70,25 @@ func TestEdge_OpenAIRequest_Accepted(t *testing.T) {
 	}
 }
 
+// AC-053b — the OpenAI `stop` field accepts a scalar string (not just an array).
+// A request with `"stop":"\n"` must return 200 (not 400) and the scalar is
+// forwarded as a single-element stop list to the canonical provider.Request.
+func TestEdge_ScalarStop_AcceptedAndNormalized(t *testing.T) {
+	h, spy := edgeServer(t, provider.Response{Model: "gpt-4", Content: "hi", FinishReason: "stop"}, nil)
+
+	rec := doJSON(t, h, `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"stop":"\n"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("scalar stop: status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if !spy.called {
+		t.Fatal("provider was not contacted")
+	}
+	got := spy.lastReq
+	if len(got.Stop) != 1 || got.Stop[0] != "\n" {
+		t.Errorf("scalar stop not normalized: got %v, want [\"\\n\"]", got.Stop)
+	}
+}
+
 // AC-054 — unknown OpenAI fields are accepted (200, not 400) and NOT forwarded
 // to the provider (liberal-accept, ADR-0012 §3).
 func TestEdge_UnknownFields_IgnoredNot400(t *testing.T) {
