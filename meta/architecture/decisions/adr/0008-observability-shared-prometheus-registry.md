@@ -39,7 +39,7 @@ Each context accepts an `ObservabilityPort` (Recorder) interface and calls it on
 - When tests run in parallel, if they accidentally share a registry, registration conflicts (`duplicate metrics` panic) are possible. Test isolation must be maintained carefully.
 
 ### Neutral
-- OTel middleware is inserted into the CTX-001 HTTP chain at initialization; exporter configuration (gRPC endpoint) is managed via env (EXT-005).
+- OTel middleware is inserted into the CTX-001 HTTP chain at initialization; exporter configuration (OTLP/HTTP endpoint, env GATEWAY_OTEL_ENDPOINT, default port 4318) is managed via env (EXT-005).
 - `slog.Logger` is injected as a dependency into all contexts at startup — no global `log.Default()`.
 - `GET /metrics`, `GET /healthz`, `GET /readyz` are registered in a separate HTTP mux of CTX-003, not in the main mux of CTX-001 — port or path separation is configured at startup.
 

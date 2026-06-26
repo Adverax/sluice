@@ -23,7 +23,7 @@ title Components: Observability Context (CTX-003)
 Person(operator, "Operator / SRE", "Runs and monitors the gateway")
 System_Ext(orchestrator, "Container Orchestrator", "Kubernetes / runtime probing liveness & readiness")
 System_Ext(prometheus, "Prometheus / Grafana", "EXT-004 -- scrapes metrics, dashboards & alerts")
-System_Ext(otel, "OpenTelemetry Collector", "EXT-005 -- receives exported spans via gRPC")
+System_Ext(otel, "OpenTelemetry Collector", "EXT-005 -- receives exported spans via OTLP/HTTP")
 ContainerDb_Ext(redis, "Redis", "EXT-002 -- rate-limit & shared state store")
 ContainerDb_Ext(postgres, "Postgres", "EXT-003 -- persistence store")
 
@@ -33,7 +33,7 @@ Container_Boundary(observability, "Observability Context") {
 
     Component(comp013, "Metrics Registry & Exporter", "Go / prometheus + promhttp -- CAP-004", "COMP-013. GET /metrics in Prometheus exposition format via promhttp.HandlerFor(reg). Owns the shared injected *prometheus.Registry (ADR-0008). Required metrics (NFR-007, 6/6): http_requests_total, http_request_duration_seconds, gateway_inflight_requests, provider_request_duration_seconds, ratelimit_rejected_total, breaker_state. Open host service to EXT-004.")
 
-    Component(comp014, "OTel Tracing Middleware", "Go / OpenTelemetry SDK -- CAP-004", "COMP-014. Produces end-to-end spans (incoming HTTP request + upstream provider call). Exports to the OTel Collector (EXT-005) over gRPC.")
+    Component(comp014, "OTel Tracing Middleware", "Go / OpenTelemetry SDK -- CAP-004", "COMP-014. Produces end-to-end spans (incoming HTTP request + upstream provider call). Exports to the OTel Collector (EXT-005) over OTLP/HTTP (otlptracehttp, port 4318).")
 
     Component(comp015, "Structured Logger", "Go / log/slog -- CAP-004", "COMP-015. Injected slog.Logger. Per-request log at INFO with request_id, latency_ms, status_code. Panics logged at ERROR with panic_value.")
 }
@@ -58,7 +58,7 @@ Rel(comp012, redis, "Readiness probe -- availability check")
 Rel(comp012, postgres, "Readiness probe -- availability check")
 
 ' Tracing export
-Rel(comp014, otel, "Exports spans", "gRPC (collector-down tolerated)")
+Rel(comp014, otel, "Exports spans", "OTLP/HTTP (collector-down tolerated)")
 
 ' Shared injected registry + logger across all four components (ADR-0008)
 Rel(comp012, comp013, "Shares injected *prometheus.Registry / slog.Logger")

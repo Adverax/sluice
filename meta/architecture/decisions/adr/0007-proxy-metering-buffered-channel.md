@@ -7,7 +7,7 @@
 
 ## Context
 
-CTX-001 (Proxy) must deliver usage events (provider, model, tokens, latency, status) to CTX-004 (Metering) after each request completes. CON-006 prohibits synchronous writes to Postgres on the hot path. INV-003 requires that the hot path never blocks on writing usage data. INV-007 allows event loss on buffer overflow (DEC-005 fixed the capacity at 1000 events).
+CTX-001 (Proxy) must deliver usage events (provider, model, tokens, latency, status) to CTX-004 (Metering) after each request completes. CON-006 prohibits synchronous writes to Postgres on the hot path. INV-003 requires that the hot path never blocks on writing usage data. INV-007 allows event loss on buffer overflow (DEC-005 set the default capacity at 1000 events, configurable via GATEWAY_METERING_BUFFER_SIZE).
 
 Within a single Go process (CON-003) the event-passing mechanism between contexts must conform to Go idioms (CON-001). Key questions: what happens on buffer overflow, and how does Metering receive the shutdown signal during graceful shutdown. NFR-003 (no goroutine leaks) constrains the acceptable approaches.
 
@@ -37,7 +37,7 @@ For each usage event Proxy launches a separate goroutine `go func() { metering.R
 - **Billing durability: an honest limitation of the approach.** Usage events are a **billing ledger**. Drop-on-full means record loss under load. In-memory drop is **acceptable for a PoC/reference repository**, but **is not billing-grade durability**. Production would require a durable queue or write-ahead log (e.g., Kafka or a local WAL) before writing to Postgres. This is a deliberate maturity gap: "what I would add for production".
 
 ### Neutral
-- The buffer capacity of 1000 events is fixed by DEC-005; this decision depends on it.
+- The buffer capacity defaults to 1000 events (DEC-005) and is configurable via GATEWAY_METERING_BUFFER_SIZE; this decision depends on it.
 - A single Metering background worker is created at service initialization and exits on receiving the shutdown signal. Its lifecycle is managed via context cancellation.
 - When Postgres is unavailable (AC-037) the background worker logs the error; the retry strategy or batch-drop strategy is a separate implementation question within CTX-004.
 - **Background flusher sizing.** The Metering background worker flushes events using a dual trigger: **batch size OR timer** (flush when a batch is assembled OR when the timer fires). Sizes are chosen so that drops occur **only under genuine overload**, not on normal traffic peaks. The 1000-event buffer (DEC-005) is calibrated to the expected burst; the flusher must sustain throughput such that in steady-state and on normal peaks the channel never fills.

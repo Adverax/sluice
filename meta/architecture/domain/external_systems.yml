@@ -42,8 +42,9 @@ external_systems:
   - id: EXT-005
     name: OpenTelemetryCollector
     direction: outbound
-    protocol: grpc
+    protocol: http
     description: >
-      An OTel Collector (or compatible backend) that receives traces. The gateway
-      is instrumented via the OpenTelemetry SDK and exports end-to-end spans for
-      latency diagnostics.
+      An OTel Collector (or compatible backend) that receives traces via OTLP/HTTP
+      (port 4318, env GATEWAY_OTEL_ENDPOINT). The gateway is instrumented via the
+      OpenTelemetry SDK (otlptracehttp) and exports end-to-end spans for latency
+      diagnostics.

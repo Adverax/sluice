@@ -64,13 +64,15 @@ aggregates:
   - id: AGG-004
     name: UsageRecord
     description: >
-      A record of resource consumption for a single request: provider, model,
-      tokens, cost, latency, status, request_id. Accumulated in an in-memory
-      buffer and flushed in batches to Postgres.
+      A record of resource consumption for a single request. Shipped as
+      `UsageEvent` (internal/metering/metering.go); `cost` is not implemented in
+      v1. Fields: provider, model, prompt_tokens, completion_tokens, total_tokens,
+      latency, status, request_id, timestamp. Accumulated in an in-memory buffer
+      and flushed in batches to Postgres (usage_events table).
     invariants:
       - id: INV-007
         statement: >
           Every successfully handled request (including provider errors) produces
-          exactly one UsageRecord. The record is not lost as long as the buffer is
+          exactly one UsageEvent. The record is not lost as long as the buffer is
           not full; when full the dropped counter is incremented without blocking
           the request.

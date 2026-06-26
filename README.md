@@ -1,5 +1,9 @@
 # sluice
 
+[![CI](https://github.com/adverax/sluice/actions/workflows/ci.yml/badge.svg)](https://github.com/adverax/sluice/actions/workflows/ci.yml)
+[![Go 1.25](https://img.shields.io/badge/go-1.25-00ADD8?logo=go&logoColor=white)](go.mod)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 **A production-grade LLM gateway in Go** — a single, contract-first HTTP front
 door for chat-completion providers that adds the resilience and observability
 patterns you need before putting an LLM in front of real traffic.
@@ -47,6 +51,18 @@ recover → logging → tracing → metrics → rate-limit → in-flight count �
                                                                                    │
                                                               router → pool → retry → breaker → provider
 ```
+
+---
+
+## Documentation
+
+| For | Read |
+|-----|------|
+| **Using the API** | [`docs/role/integrator/`](docs/role/integrator/) — requests, streaming, rate limits, errors, API reference |
+| **Operating it** | [`docs/role/operator/`](docs/role/operator/) — running the stack, health, the metric catalog, tuning, shutdown |
+| **How it works inside** | [`docs/how-it-works/`](docs/how-it-works/) — layered, code-grounded mechanism docs per aspect (with diagrams) |
+| **Why it's built this way** | [`meta/`](meta/README.md) — ADRs, C4 diagrams, the domain model, requirements traceability, and the build log |
+| **The original spec** | [`doc/requirements.md`](doc/requirements.md) — the brief this was built to |
 
 ---
 

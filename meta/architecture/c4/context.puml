@@ -20,7 +20,7 @@ System_Ext(llmProvider, "LLM Provider", "EXT-001: upstream that executes inferen
 System_Ext(redis, "Redis", "EXT-002: distributed rate-limit buckets and response cache")
 System_Ext(postgres, "Postgres", "EXT-003: async usage_events ledger (control plane)")
 System_Ext(prometheus, "Prometheus / Grafana", "EXT-004: scrapes GET /metrics; Grafana dashboards")
-System_Ext(otel, "OpenTelemetry Collector", "EXT-005: receives end-to-end traces via gRPC")
+System_Ext(otel, "OpenTelemetry Collector", "EXT-005: receives end-to-end traces via OTLP/HTTP (port 4318)")
 
 Rel(apiClient, sluice, "Sends inference requests (JSON / SSE)", "HTTPS/REST")
 Rel(operator, sluice, "Checks health/readiness, scrapes metrics, manages lifecycle")
@@ -28,5 +28,5 @@ Rel(sluice, llmProvider, "Infers / streams completions", "HTTPS/REST")
 Rel_Neighbor(sluice, redis, "Rate-limit buckets, response cache", "RESP")
 Rel(sluice, postgres, "Async batch insert of usage records", "SQL/pgx")
 Rel(prometheus, sluice, "Scrapes metrics", "HTTP GET /metrics")
-Rel(sluice, otel, "Exports traces", "gRPC/OTLP")
+Rel(sluice, otel, "Exports traces", "OTLP/HTTP")
 @enduml

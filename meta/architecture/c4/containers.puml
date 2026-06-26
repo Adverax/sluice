@@ -42,5 +42,5 @@ Rel(proxy, redis, "Cache get/set with TTL", "RESP (CacheRepository, ADR-0010)")
 Rel(resilience, redis, "Distributed token buckets", "RESP (RateLimitRepository, ADR-0010)")
 Rel(metering, postgres, "Batch INSERT usage_events", "SQL/pgx (MeteringRepository, ADR-0010)")
 Rel(prometheus, observability, "Scrapes", "HTTP GET /metrics")
-Rel(observability, otel, "Exports spans", "gRPC/OTLP")
+Rel(observability, otel, "Exports spans", "OTLP/HTTP")
 @enduml

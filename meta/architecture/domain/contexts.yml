@@ -56,12 +56,12 @@ contexts:
     name: Metering
     description: >
       Asynchronous per-request recording of resource consumption to Postgres outside
-      the hot path. Accumulates UsageRecord entries in an in-memory buffer
-      (UsageBuffer) and flushes them in batches via a background worker. When the
-      buffer overflows, events are dropped without blocking the request. Fully
-      isolated from the hot path: the only coupling point is a one-way write to the
-      buffer (INV-003, INV-007). Language: usage record, metering buffer, batch
-      flush, dropped events.
+      the hot path. Accumulates UsageEvent entries (shipped type; `cost` not
+      implemented in v1) in an in-memory buffer (UsageBuffer) and flushes them in
+      batches via a background worker. When the buffer overflows, events are dropped
+      without blocking the request. Fully isolated from the hot path: the only
+      coupling point is a one-way write to the buffer (INV-003, INV-007). Language:
+      usage event, metering buffer, batch flush, dropped events.
     capabilities: [CAP-006]
     aggregates: [AGG-004]
     ubiquitous_language: [TERM-006, TERM-007]
@@ -155,8 +155,8 @@ context_map:
     relationship: anticorruption_layer
     integration: sync_api
     description: >
-      Metering persists UsageRecord entries in batches to Postgres via pgx/v5. ACL:
-      the metering repository encapsulates SQL details; the UsageRecord domain model
+      Metering persists UsageEvent entries in batches to Postgres via pgx/v5. ACL:
+      the metering repository encapsulates SQL details; the UsageEvent domain model
       does not depend on pgx types.
     decision: DEC-010
 
@@ -175,6 +175,6 @@ context_map:
     relationship: conformist
     integration: sync_api
     description: >
-      Observability exports OTel traces to the OpenTelemetry Collector via gRPC.
+      Observability exports OTel traces to the OpenTelemetry Collector via OTLP/HTTP (port 4318).
       Conformist: Observability follows the OTel protocol without adaptation.
     decision: DEC-008

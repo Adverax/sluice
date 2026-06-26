@@ -52,7 +52,7 @@ gobreaker.Settings{
 - **Tumbling window — not a sliding window.** A burst of errors arriving at the boundary of two `Interval` periods will be split across two windows and may briefly under-count or over-count depending on phase. A true sliding window (as in Envoy outlier detection or resilience4j sliding-window) would require a custom implementation. For this PoC a tumbling window is **acceptable** — provided it is explicitly documented (which this ADR does).
 
 ### Neutral
-- Parameters are fixed in code; in v1 they are not configurable via env (unlike worker pool size — DEC-003). Follow-up: make parameters env-configurable if needed.
+- Parameters are configurable via env: GATEWAY_BREAKER_INTERVAL, GATEWAY_BREAKER_TIMEOUT, GATEWAY_BREAKER_MAX_REQUESTS, GATEWAY_BREAKER_MIN_REQUESTS, GATEWAY_BREAKER_FAILURE_RATIO, GATEWAY_BREAKER_RETRY_AFTER (all with the defaults stated above; fail-loud on invalid values).
 - The `sony/gobreaker` library natively supports volume-based configuration via the `ReadyToTrip` callback — no additional dependencies are required (CON-001, CON-002).
 
 ## References

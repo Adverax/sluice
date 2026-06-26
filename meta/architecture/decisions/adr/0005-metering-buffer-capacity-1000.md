@@ -25,12 +25,12 @@ UsageBuffer capacity = 10000 events. A larger buffer reduces drop frequency duri
 
 ### Positive
 - AC-036 becomes executable: the test generates 1001 events and verifies that the N+1-th is dropped without blocking — a concrete, fast test.
-- Small memory footprint: 1000 pointers to `UsageRecord` structs occupy only a few megabytes.
+- Small memory footprint: 1000 `UsageEvent` structs occupy only a few megabytes.
 - A fixed threshold makes overflow behaviour predictable and operationally observable via the `metering_events_dropped_total` metric.
 
 ### Negative
 - Under high load with a slow Postgres (or temporary unavailability) the buffer may overflow and some usage events will be lost. This is consistent with INV-007 (drops are acceptable), but the operator must monitor `metering_events_dropped_total`.
-- The value of 1000 is not configurable in v1 — changing the threshold will require a rebuild.
+- The value of 1000 is the default; it is configurable via `GATEWAY_METERING_BUFFER_SIZE` (env var, fail-loud on invalid value).
 
 ### Neutral
 - The `metering_events_dropped_total` counter (Prometheus) must be registered in the shared registry (DEC-008) for overflow monitoring.
