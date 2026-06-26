@@ -31,29 +31,33 @@ Connection: keep-alive
 
 ## SSE wire format
 
-Each event is a line starting with `data: ` followed by a JSON object, then a
-blank line:
+The stream is the **real OpenAI streaming format**: each event is a line
+starting with `data: ` followed by a `chat.completion.chunk` JSON object, then a
+blank line. The stream ends with a literal `data: [DONE]`. The `id`, `created`
+and `model` are stable across every chunk of one stream.
 
 ```
-data: {"content":"this is a mock completion"}
+data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1718000000,"model":"mock","choices":[{"index":0,"delta":{"content":"this "}}]}
 
-data: {"done":true,"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}
+data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1718000000,"model":"mock","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
 
 data: [DONE]
 ```
 
 ### Event shapes
 
-**Content delta** — carries a fragment of the assistant's reply:
+**Content delta** — carries a fragment of the assistant's reply in
+`choices[0].delta.content`:
 
 ```json
-{"content": "<text fragment>"}
+{"id":"chatcmpl-…","object":"chat.completion.chunk","created":1718000000,"model":"mock","choices":[{"index":0,"delta":{"content":"<text fragment>"}}]}
 ```
 
-**Terminal event** — signals the stream is complete and carries token usage:
+**Final chunk** — an empty delta with a `finish_reason`, emitted just before the
+terminator:
 
 ```json
-{"done": true, "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
+{"id":"chatcmpl-…","object":"chat.completion.chunk","created":1718000000,"model":"mock","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
 ```
 
 **Stream terminator** — the final line, always present at the end of a successful stream:
@@ -62,7 +66,8 @@ data: [DONE]
 data: [DONE]
 ```
 
-Stop reading after you see `data: [DONE]`.
+Stop reading after you see `data: [DONE]`. Token usage for a streamed completion
+is recorded by the gateway for metering; it is not echoed in the SSE chunks.
 
 ## Cancelling a stream
 
@@ -89,6 +94,9 @@ appropriate status code — **before** writing any SSE bytes. You will see a
 | 429 | Rate limit exceeded. |
 | 503 | Gateway overloaded or circuit breaker open. Includes `Retry-After`. |
 | 502 | Provider error at stream initiation. |
+
+These pre-stream errors use the OpenAI error envelope
+`{"error": {"message", "type", "code"}}`.
 
 Once the `200` header and `Content-Type: text/event-stream` are written, a
 mid-stream transport error causes the stream to end with `data: [DONE]` and no

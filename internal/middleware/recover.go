@@ -53,7 +53,8 @@ func Recoverer(logger *slog.Logger) func(http.Handler) http.Handler {
 					// process still survives — which is the AC-033 guarantee.
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusInternalServerError)
-					_, _ = w.Write([]byte(`{"error":"internal_error","message":"internal server error"}`))
+					// OpenAI error envelope (ADR-0012 §7) for SDK-parsable 500s.
+					_, _ = w.Write([]byte(`{"error":{"message":"internal server error","type":"server_error","code":"internal_error"}}`))
 				}
 			}()
 

@@ -90,24 +90,38 @@ func TestGeneratedAPI_HasChatCompletionsContract(t *testing.T) {
 		t.Fatalf("role enum mismatch: %v", req.Messages[1].Role)
 	}
 
-	// Response: model + content + finish_reason + usage{prompt,completion,total}.
+	// Response: real OpenAI chat.completion shape — id/object/created/model +
+	// choices[]{index,message{role,content},finish_reason} + usage (ADR-0012).
+	finish := "stop"
 	resp := api.ChatCompletionResponse{
-		Model:        "gpt-4o-mini",
-		Content:      "hi",
-		FinishReason: "stop",
+		Id:      "chatcmpl-abc123",
+		Object:  "chat.completion",
+		Created: 1700000000,
+		Model:   "gpt-4o-mini",
+		Choices: []api.Choice{{
+			Index:        0,
+			Message:      api.ResponseMessage{Role: "assistant", Content: "hi"},
+			FinishReason: &finish,
+		}},
 		Usage: api.Usage{
 			PromptTokens:     1,
 			CompletionTokens: 1,
 			TotalTokens:      2,
 		},
 	}
-	if resp.Usage.TotalTokens != 2 {
-		t.Fatalf("usage mismatch: %+v", resp.Usage)
+	if resp.Object != "chat.completion" || len(resp.Choices) != 1 {
+		t.Fatalf("unexpected response shape: %+v", resp)
+	}
+	if resp.Choices[0].Message.Content != "hi" || resp.Usage.TotalTokens != 2 {
+		t.Fatalf("response mismatch: %+v", resp)
 	}
 
-	// Error envelope: {error, message}.
-	apiErr := api.Error{Error: "bad_request", Message: "missing model"}
-	if apiErr.Error == "" || apiErr.Message == "" {
+	// Error envelope: OpenAI shape {error:{message,type,code}}.
+	code := "missing_model"
+	apiErr := api.Error{Error: api.ErrorDetail{
+		Message: "missing model", Type: "invalid_request_error", Code: &code,
+	}}
+	if apiErr.Error.Message == "" || apiErr.Error.Type == "" {
 		t.Fatalf("unexpected error envelope: %+v", apiErr)
 	}
 

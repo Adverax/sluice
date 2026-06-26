@@ -64,6 +64,29 @@ services:
       - "9090:9090"
     restart: unless-stopped
 
+  # OPTIONAL Ollama backend (ADR-0013 showcase). NOT started by default — it sits
+  # behind the `ollama` compose profile so `make up` stays fast and never pulls a
+  # model. Enable a real OpenAI-compatible backend with:
+  #
+  #   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.stack.yml \
+  #     --profile ollama up -d
+  #   docker compose ... exec ollama ollama pull llama3.2   # one-time model pull
+  #
+  # then point the gateway at it (the URL must include the /v1 segment):
+  #
+  #   GATEWAY_UPSTREAM_URL=http://ollama:11434/v1
+  #   GATEWAY_UPSTREAM_MODEL=llama3.2
+  #
+  # See README "Real OpenAI-compatible backend (optional)" for the full flow.
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+
   grafana:
     image: grafana/grafana:11.2.0
     depends_on:
@@ -83,3 +106,4 @@ services:
 
 volumes:
   grafana-data:
+  ollama-data:

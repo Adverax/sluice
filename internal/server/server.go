@@ -248,36 +248,42 @@ func (s *Server) CreateChatCompletion(ctx context.Context, request api.CreateCha
 		// Defensive: the strict server populates Body on a successful decode and
 		// surfaces a malformed/absent body as 400 before reaching here. If it is
 		// somehow nil, treat it as a bad request rather than panicking.
-		return badRequest("missing_body", "request body is required"), nil
+		return badRequest("request body is required", "invalid_request_error", "missing_body"), nil
 	}
 	body := *request.Body
 
 	if body.Model == "" {
 		// Absent model: do not contact any provider (AC-006).
-		return badRequest("missing_model", "the 'model' field is required"), nil
+		return badRequest("the 'model' field is required", "invalid_request_error", "missing_model"), nil
 	}
 
 	if len(body.Messages) == 0 {
 		// Empty messages: the provider has nothing to infer from; reject early
 		// rather than forwarding an empty conversation (defensive AC).
-		return badRequest("empty_messages", "the 'messages' field must contain at least one message"), nil
+		return badRequest("the 'messages' field must contain at least one message", "invalid_request_error", "empty_messages"), nil
+	}
+
+	// Map the OpenAI request onto the canonical provider.Request (ADR-0009 ACL).
+	// Unknown fields are accepted-but-ignored (liberal-accept); the documented
+	// non-goal n>1 → OpenAI-shaped 400 (AC-055) WITHOUT contacting any provider.
+	req, eerr := toCanonicalRequest(body)
+	if eerr != nil {
+		return badRequest(eerr.message, eerr.typ, eerr.code), nil
 	}
 
 	prov, err := s.router.Provider(body.Model)
 	if err != nil {
 		if errors.Is(err, proxy.ErrModelNotRegistered) {
 			// Unregistered model: do not contact any provider (AC-007).
-			return notFound("unknown_model", "no provider is registered for model "+body.Model), nil
+			return notFound("no provider is registered for model " + body.Model), nil
 		}
 		// Unexpected routing failure.
 		s.logger.LogAttrs(ctx, slog.LevelError, "router lookup failed",
 			slog.String("model", body.Model),
 			slog.String("error", err.Error()),
 		)
-		return badGateway("routing_error", "failed to route request"), nil
+		return badGateway("failed to route request"), nil
 	}
-
-	req := toCanonicalRequest(body)
 
 	// Streaming path (FR-001 AC-002, FR-003): when the client requests a stream
 	// we cannot return a buffered response object — we must take over the raw
@@ -325,7 +331,7 @@ func (s *Server) CreateChatCompletion(ctx context.Context, request api.CreateCha
 			slog.String("model", body.Model),
 			slog.String("error", err.Error()),
 		)
-		return badGateway("provider_error", "upstream provider request failed"), nil
+		return badGateway("upstream provider request failed"), nil
 	}
 
 	// Async usage metering (FR-014): record the completed inference. Enqueue is
@@ -335,7 +341,7 @@ func (s *Server) CreateChatCompletion(ctx context.Context, request api.CreateCha
 	// canonical Usage (ADR-0009); status is 200 (success path).
 	s.recordUsage(ctx, body.Model, resp.Model, resp.Usage, time.Since(start), http.StatusOK)
 
-	return api.CreateChatCompletion200JSONResponse(toAPIResponse(resp)), nil
+	return api.CreateChatCompletion200JSONResponse(toUnaryResponse(resp)), nil
 }
 
 // recordUsage builds a UsageEvent from a completed inference and enqueues it on
@@ -361,63 +367,28 @@ func (s *Server) recordUsage(ctx context.Context, routeKey, model string, usage 
 	})
 }
 
-// toCanonicalRequest maps the generated request DTO onto the canonical
-// provider.Request (ADR-0009). Public temperature is float32; the canonical
-// field is *float64, so a present temperature is widened and pointed to.
-func toCanonicalRequest(body api.ChatCompletionRequest) provider.Request {
-	req := provider.Request{
-		Model:    body.Model,
-		Messages: make([]provider.Message, 0, len(body.Messages)),
-	}
-	if body.Stream != nil {
-		req.Stream = *body.Stream
-	}
-	if body.MaxTokens != nil {
-		req.MaxTokens = *body.MaxTokens
-	}
-	if body.Temperature != nil {
-		t := float64(*body.Temperature)
-		req.Temperature = &t
-	}
-	for _, m := range body.Messages {
-		req.Messages = append(req.Messages, provider.Message{
-			Role:    provider.Role(m.Role),
-			Content: m.Content,
-		})
-	}
-	return req
-}
-
-// toAPIResponse maps the canonical provider.Response back onto the generated
-// response DTO (ADR-0009).
-func toAPIResponse(resp provider.Response) api.ChatCompletionResponse {
-	return api.ChatCompletionResponse{
-		Model:        resp.Model,
-		Content:      resp.Content,
-		FinishReason: resp.FinishReason,
-		Usage: api.Usage{
-			PromptTokens:     resp.Usage.PromptTokens,
-			CompletionTokens: resp.Usage.CompletionTokens,
-			TotalTokens:      resp.Usage.TotalTokens,
-		},
-	}
-}
-
-func badRequest(code, msg string) api.CreateChatCompletion400JSONResponse {
+// badRequest builds an OpenAI-shaped 400 (FR-020). msg is the human-readable
+// message; typ is the OpenAI error type ("invalid_request_error"); code is the
+// machine-readable code (may be empty → null).
+func badRequest(msg, typ, code string) api.CreateChatCompletion400JSONResponse {
 	return api.CreateChatCompletion400JSONResponse{
-		BadRequestJSONResponse: api.BadRequestJSONResponse{Error: code, Message: msg},
+		BadRequestJSONResponse: api.BadRequestJSONResponse(openAIError(msg, typ, code)),
 	}
 }
 
-func notFound(code, msg string) api.CreateChatCompletion404JSONResponse {
+// notFound builds an OpenAI-shaped 404 (unknown model). OpenAI itself maps an
+// unknown model to invalid_request_error/model_not_found.
+func notFound(msg string) api.CreateChatCompletion404JSONResponse {
 	return api.CreateChatCompletion404JSONResponse{
-		NotFoundJSONResponse: api.NotFoundJSONResponse{Error: code, Message: msg},
+		NotFoundJSONResponse: api.NotFoundJSONResponse(openAIError(msg, "invalid_request_error", "model_not_found")),
 	}
 }
 
-func badGateway(code, msg string) api.CreateChatCompletion502JSONResponse {
+// badGateway builds an OpenAI-shaped 502 for a mapped upstream provider error
+// (FR-020, AC-061).
+func badGateway(msg string) api.CreateChatCompletion502JSONResponse {
 	return api.CreateChatCompletion502JSONResponse{
-		BadGatewayJSONResponse: api.BadGatewayJSONResponse{Error: code, Message: msg},
+		BadGatewayJSONResponse: api.BadGatewayJSONResponse(openAIError(msg, "upstream_error", "bad_gateway")),
 	}
 }
 
@@ -433,10 +404,9 @@ func (s *Server) serviceUnavailable(err error) api.CreateChatCompletionResponseO
 	}
 	return serviceUnavailableResponse{
 		body: api.CreateChatCompletion503JSONResponse{
-			ServiceUnavailableJSONResponse: api.ServiceUnavailableJSONResponse{
-				Error:   "service_unavailable",
-				Message: "upstream temporarily unavailable; retry later",
-			},
+			ServiceUnavailableJSONResponse: api.ServiceUnavailableJSONResponse(
+				openAIError("upstream temporarily unavailable; retry later", "service_unavailable", "service_unavailable"),
+			),
 		},
 		retryAfter: retryAfter,
 	}
@@ -536,6 +506,10 @@ func (r streamResponse) VisitCreateChatCompletionResponse(w http.ResponseWriter)
 	rc := http.NewResponseController(w)
 	_ = rc.Flush() // flush headers so the client sees the stream open immediately.
 
+	// One edge-generated id + created for the whole stream (ADR-0012 §6): every
+	// chat.completion.chunk shares them so a client can correlate the deltas.
+	shaper := newStreamShaper(r.model)
+
 	for {
 		select {
 		case <-r.ctx.Done():
@@ -566,8 +540,9 @@ func (r streamResponse) VisitCreateChatCompletionResponse(w http.ResponseWriter)
 				return nil
 			}
 			if chunk.Done {
-				// Terminal success chunk: emit any usage-bearing event then [DONE].
-				payload, mErr := json.Marshal(toAPIChunk(chunk))
+				// Terminal success chunk: emit the final OpenAI chunk (empty delta,
+				// finish_reason "stop") then the literal [DONE] sentinel (ADR-0012 §6).
+				payload, mErr := json.Marshal(shaper.finalChunk())
 				if mErr == nil {
 					_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
 					_ = rc.Flush()
@@ -580,9 +555,9 @@ func (r streamResponse) VisitCreateChatCompletionResponse(w http.ResponseWriter)
 				r.recordUsage(chunk.Usage)
 				return nil
 			}
-			// Content delta: forward as an SSE data event and flush so the client
-			// receives it as it arrives (AC-002).
-			payload, mErr := json.Marshal(toAPIChunk(chunk))
+			// Content delta: forward as an OpenAI chat.completion.chunk SSE event and
+			// flush so the client receives it as it arrives (AC-002, AC-058).
+			payload, mErr := json.Marshal(shaper.contentChunk(chunk.Content))
 			if mErr != nil {
 				r.logger.LogAttrs(r.ctx, slog.LevelError, "marshal stream chunk",
 					slog.String("model", r.model),
@@ -624,10 +599,8 @@ func (r streamResponse) writeInitError(w http.ResponseWriter, err error) error {
 			w.Header().Set("Retry-After", strconv.Itoa(secs))
 		}
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(api.Error{
-			Error:   "service_unavailable",
-			Message: "upstream temporarily unavailable; retry later",
-		})
+		_ = json.NewEncoder(w).Encode(openAIError(
+			"upstream temporarily unavailable; retry later", "service_unavailable", "service_unavailable"))
 		return nil
 	}
 
@@ -640,10 +613,8 @@ func (r streamResponse) writeInitError(w http.ResponseWriter, err error) error {
 	)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadGateway)
-	_ = json.NewEncoder(w).Encode(api.Error{
-		Error:   "provider_error",
-		Message: "upstream provider request failed",
-	})
+	_ = json.NewEncoder(w).Encode(openAIError(
+		"upstream provider request failed", "upstream_error", "bad_gateway"))
 	return nil
 }
 
@@ -678,28 +649,6 @@ func (r streamResponse) recordUsage(usage provider.Usage) {
 	})
 }
 
-// streamChunk is the wire shape of one SSE data event on the streaming path. It
-// keeps the canonical Chunk fields (content + usage) crossing the boundary as
-// provider-agnostic JSON (ADR-0009); no provider-specific type is exposed.
-type streamChunk struct {
-	Content string    `json:"content,omitempty"`
-	Done    bool      `json:"done,omitempty"`
-	Usage   api.Usage `json:"usage,omitempty"`
-}
-
-// toAPIChunk maps a canonical provider.Chunk onto the SSE wire shape.
-func toAPIChunk(c provider.Chunk) streamChunk {
-	return streamChunk{
-		Content: c.Content,
-		Done:    c.Done,
-		Usage: api.Usage{
-			PromptTokens:     c.Usage.PromptTokens,
-			CompletionTokens: c.Usage.CompletionTokens,
-			TotalTokens:      c.Usage.TotalTokens,
-		},
-	}
-}
-
 // Handler builds the http.Handler for the gateway: it wraps this Server in the
 // generated strict handler and registers all routes (incl. /v1/chat/completions,
 // /healthz, /readyz, /metrics) on mux via api.HandlerFromMux (CON-001). The
@@ -732,13 +681,13 @@ func (s *Server) Handler(mux *http.ServeMux) http.Handler {
 
 	validator := openapi3filter.NewValidator(
 		router,
-		openapi3filter.OnErr(func(ctx context.Context, w http.ResponseWriter, status int, code openapi3filter.ErrCode, err error) {
+		openapi3filter.OnErr(func(_ context.Context, w http.ResponseWriter, status int, _ openapi3filter.ErrCode, err error) {
+			// A schema-validation failure (e.g. unknown enum role, missing required
+			// field, array content) is rendered as an OpenAI-shaped error envelope
+			// so unmodified OpenAI SDKs parse it (ADR-0012 §7, FR-020).
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(status)
-			_ = json.NewEncoder(w).Encode(api.Error{
-				Error:   "validation_error",
-				Message: err.Error(),
-			})
+			_ = json.NewEncoder(w).Encode(openAIError(err.Error(), "invalid_request_error", "validation_error"))
 		}),
 		// Only validate requests; leave response validation off (not needed and
 		// adds per-request buffering overhead — strict mode can be enabled later).

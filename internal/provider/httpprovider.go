@@ -179,7 +179,9 @@ func (p *HTTPProvider) toOAIRequest(req Request, stream bool) oaiRequest {
 		Messages:    msgs,
 		Stream:      stream,
 		Temperature: req.Temperature,
+		TopP:        req.TopP,
 		MaxTokens:   req.MaxTokens,
+		Stop:        req.Stop,
 	}
 	if stream {
 		out.StreamOptions = &oaiStreamOptions{IncludeUsage: true}

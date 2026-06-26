@@ -19,23 +19,33 @@ X-Cache-TTL: <seconds>        (optional; see caching.md)
 
 #### Request body (`ChatCompletionRequest`)
 
+Real OpenAI `/v1/chat/completions` wire format. **Liberal accept:** any field
+not listed below (`seed`, `user`, `presence_penalty`, `frequency_penalty`,
+`logit_bias`, `response_format`, `n`, `logprobs`, …) is accepted and ignored,
+never a 400. `n>1`, multimodal/array `content`, and function calling are
+non-goals and return a 400.
+
 ```json
 {
   "model":       "<string, required>",
   "messages":    [<Message>, ...],
   "stream":      false,
   "max_tokens":  1024,
-  "temperature": 0.7
+  "temperature": 0.7,
+  "top_p":       0.9,
+  "stop":        ["\n"]
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `model` | string | yes | Model to run the completion against. v1: `"mock"`. |
+| `model` | string | yes | Model to run the completion against (also the routing key). |
 | `messages` | array of [Message](#message) | yes | Ordered conversation history. At least one entry required. |
 | `stream` | boolean | no (default `false`) | `true` → SSE stream response. |
 | `max_tokens` | integer | no | Maximum completion length. |
 | `temperature` | number | no | Sampling temperature. |
+| `top_p` | number | no | Nucleus-sampling probability mass. |
+| `stop` | array of string | no | Stop sequences that end generation. |
 
 #### Message
 
@@ -55,13 +65,22 @@ Content-Type: application/json
 X-Cache: HIT | MISS
 ```
 
-Body (`ChatCompletionResponse`):
+Body (`ChatCompletionResponse`) — a real OpenAI `chat.completion` object.
+`id`/`object`/`created` are generated at the edge; `system_fingerprint` is omitted.
 
 ```json
 {
-  "model":         "mock",
-  "content":       "this is a mock completion",
-  "finish_reason": "stop",
+  "id":      "chatcmpl-9f8c1a2b3c4d5e6f70819a2b",
+  "object":  "chat.completion",
+  "created": 1718000000,
+  "model":   "mock",
+  "choices": [
+    {
+      "index":   0,
+      "message": {"role": "assistant", "content": "this is a mock completion"},
+      "finish_reason": "stop"
+    }
+  ],
   "usage": {
     "prompt_tokens":     0,
     "completion_tokens": 0,
@@ -72,9 +91,14 @@ Body (`ChatCompletionResponse`):
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `id` | string | Edge-generated completion id, prefixed `chatcmpl-`. |
+| `object` | string | Always `"chat.completion"`. |
+| `created` | integer | Unix timestamp (seconds). |
 | `model` | string | Model that produced the completion. |
-| `content` | string | Assistant reply text. |
-| `finish_reason` | string | Why the completion ended, e.g. `"stop"` or `"length"`. |
+| `choices` | array | Always exactly one choice (`index: 0`). |
+| `choices[0].message.role` | string | Always `"assistant"`. |
+| `choices[0].message.content` | string | Assistant reply text. |
+| `choices[0].finish_reason` | string | Why the completion ended, e.g. `"stop"` or `"length"`. |
 | `usage.prompt_tokens` | integer | Tokens in the prompt. |
 | `usage.completion_tokens` | integer | Tokens in the completion. |
 | `usage.total_tokens` | integer | Sum of prompt + completion tokens. |
@@ -87,17 +111,18 @@ Cache-Control: no-cache
 Connection: keep-alive
 ```
 
-Body: a sequence of SSE events.
+Body: a sequence of OpenAI `chat.completion.chunk` SSE events, terminated by
+`data: [DONE]`. `id`/`created`/`model` are stable across the stream.
 
 **Content delta:**
 ```
-data: {"content":"<text fragment>"}
+data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1718000000,"model":"mock","choices":[{"index":0,"delta":{"content":"<text fragment>"}}]}
 
 ```
 
-**Terminal event (usage):**
+**Final chunk (finish_reason):**
 ```
-data: {"done":true,"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}
+data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1718000000,"model":"mock","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
 
 ```
 
@@ -130,7 +155,7 @@ Headers: `Retry-After: <seconds>`
 Body: [Error](#error)
 
 ```json
-{"error": "rate_limited", "message": "rate limit exceeded; retry later"}
+{"error": {"message": "rate limit exceeded; retry later", "type": "rate_limit_error", "code": "rate_limited"}}
 ```
 
 Returned when: the API key has exceeded its request quota.
@@ -146,7 +171,7 @@ Returned when: an unexpected error occurred inside the gateway.
 Body: [Error](#error)
 
 ```json
-{"error": "provider_error", "message": "upstream provider request failed"}
+{"error": {"message": "upstream provider request failed", "type": "upstream_error", "code": "bad_gateway"}}
 ```
 
 Returned when: the upstream provider returned an error, or all retries were
@@ -159,7 +184,7 @@ Headers: `Retry-After: <seconds>`
 Body: [Error](#error)
 
 ```json
-{"error": "service_unavailable", "message": "upstream temporarily unavailable; retry later"}
+{"error": {"message": "upstream temporarily unavailable; retry later", "type": "service_unavailable", "code": "service_unavailable"}}
 ```
 
 Returned when: the worker pool is saturated (gateway is overloaded), or the
@@ -245,17 +270,24 @@ Body: Prometheus text exposition format. Includes metrics:
 
 ### Error
 
+The OpenAI error envelope, so unmodified OpenAI SDKs parse gateway and
+mapped-upstream errors.
+
 ```json
 {
-  "error":   "<machine-readable code>",
-  "message": "<human-readable description>"
+  "error": {
+    "message": "<human-readable description>",
+    "type":    "<error type, e.g. invalid_request_error>",
+    "code":    "<machine-readable code, or null>"
+  }
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `error` | string | Short, machine-readable error code. |
-| `message` | string | Human-readable description. |
+| `error.message` | string | Human-readable description. |
+| `error.type` | string | OpenAI error type (e.g. `invalid_request_error`, `rate_limit_error`, `server_error`). |
+| `error.code` | string \| null | Short, machine-readable code (may be null). |
 
 ### Usage
 

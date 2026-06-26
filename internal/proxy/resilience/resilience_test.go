@@ -159,10 +159,16 @@ func TestComposition_BreakerOpen_503_RetryAfter(t *testing.T) {
 		t.Errorf("open breaker must not contact provider; calls went %d → %d", before, p.calls.Load())
 	}
 
-	var body struct{ Error string }
+	// OpenAI-shaped error envelope {error:{message,type,code}} (ADR-0012 §7).
+	var body struct {
+		Error struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		} `json:"error"`
+	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	if body.Error != "service_unavailable" {
-		t.Errorf("expected service_unavailable error code, got %q", body.Error)
+	if body.Error.Type != "service_unavailable" {
+		t.Errorf("expected service_unavailable error type, got %q", body.Error.Type)
 	}
 }
 

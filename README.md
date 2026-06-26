@@ -101,6 +101,9 @@ the infra-only containers started by `make run`.
 
 ### Non-streaming completion
 
+sluice speaks the **real OpenAI `/v1/chat/completions` wire format** (ADR-0012),
+so it is a drop-in for the OpenAI SDKs and `curl` — only the base URL changes.
+
 ```sh
 curl -sS http://localhost:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
@@ -111,8 +114,38 @@ curl -sS http://localhost:8080/v1/chat/completions \
 ```
 
 ```json
-{"model":"mock","content":"this is a mock completion","finish_reason":"stop",
- "usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}
+{
+  "id": "chatcmpl-9f8c1a2b3c4d5e6f70819a2b",
+  "object": "chat.completion",
+  "created": 1718000000,
+  "model": "mock",
+  "choices": [
+    {
+      "index": 0,
+      "message": {"role": "assistant", "content": "this is a mock completion"},
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+}
+```
+
+The request is **liberal-accept**: unknown OpenAI fields (`seed`, `user`,
+`presence_penalty`, `frequency_penalty`, `logit_bias`, `response_format`, `n`,
+`logprobs`, …) are accepted and ignored — never a 400. `n>1`, multimodal/array
+content, and function calling are documented non-goals (CON-008) and return an
+OpenAI-shaped 400.
+
+You can also point the official OpenAI SDK at sluice unmodified:
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="sk-anything")
+resp = client.chat.completions.create(
+    model="mock",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(resp.choices[0].message.content)
 ```
 
 ### Streaming completion (SSE)
@@ -128,11 +161,17 @@ curl -N http://localhost:8080/v1/chat/completions \
 ```
 
 ```
-data: {"content":"this is a mock completion"}
+data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1718000000,"model":"mock","choices":[{"index":0,"delta":{"content":"this "}}]}
 
-data: {"done":true,"usage":{...}}
+data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1718000000,"model":"mock","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
 
 data: [DONE]
+```
+
+Errors use the OpenAI envelope so SDKs parse them:
+
+```json
+{"error": {"message": "no provider is registered for model x", "type": "invalid_request_error", "code": "model_not_found"}}
 ```
 
 ### Health
@@ -141,6 +180,42 @@ data: [DONE]
 curl http://localhost:8080/healthz   # liveness  → 200 {"status":"ok"}
 curl http://localhost:8080/readyz    # readiness → 200 when redis+postgres are up, else 503
 ```
+
+### Real OpenAI-compatible backend (optional)
+
+By default `make up` uses the **in-process mock** upstream, so the demo is fast
+and pulls no models. To proxy a real OpenAI-compatible backend, set the upstream
+env vars (the URL must include the `/v1` segment):
+
+| Backend | `GATEWAY_UPSTREAM_URL` | `GATEWAY_UPSTREAM_MODEL` | Key |
+|---------|------------------------|--------------------------|-----|
+| Ollama | `http://ollama:11434/v1` (compose) or `http://localhost:11434/v1` (host) | `llama3.2` | none |
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` | `GATEWAY_UPSTREAM_API_KEY=sk-…` |
+| vLLM / LM Studio | `http://host:port/v1` | your model | optional |
+
+An optional **Ollama** service ships behind the `ollama` compose profile (it is
+NOT started by default):
+
+```sh
+# start the stack WITH Ollama
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.stack.yml \
+  --profile ollama up -d
+
+# one-time model pull
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.stack.yml \
+  exec ollama ollama pull llama3.2
+```
+
+Then run the gateway against it (host process):
+
+```sh
+GATEWAY_UPSTREAM_URL=http://localhost:11434/v1 \
+GATEWAY_UPSTREAM_MODEL=llama3.2 \
+go run ./cmd/gateway
+```
+
+Because the edge is wire-compatible, the same `curl`/SDK calls above work
+unchanged — just use `"model": "llama3.2"`.
 
 ---
 

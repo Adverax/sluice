@@ -115,6 +115,15 @@ type Request struct {
 
 	// Temperature optionally controls sampling. Nil means "unset".
 	Temperature *float64 `json:"temperature,omitempty"`
+
+	// TopP optionally controls nucleus sampling. Nil means "unset". Carried
+	// through the canonical request so the edge (ADR-0012) can forward the
+	// OpenAI `top_p` field to an OpenAI-compatible upstream (ADR-0013).
+	TopP *float64 `json:"top_p,omitempty"`
+
+	// Stop optionally lists stop sequences that end generation. Empty means
+	// "unset". Carried through so the edge can forward the OpenAI `stop` field.
+	Stop []string `json:"stop,omitempty"`
 }
 
 // Usage is the canonical, provider-agnostic token accounting for a completion.

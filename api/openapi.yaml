@@ -7,10 +7,17 @@ info:
     This specification is the single source of truth for the wire contract
     (ADR-0011, contract-first). Server types and the routing boundary are
     generated from it with `oapi-codegen` v2 (`std-http-server` + `models` +
-    `strict-server`). Handlers (CARD-003) implement the generated
-    `StrictServerInterface` and map these public DTOs to/from the canonical
+    `strict-server`). Handlers implement the generated `StrictServerInterface`
+    and map these public DTOs to/from the canonical
     `provider.Request`/`Response` via the anti-corruption layer (ADR-0009).
-  version: 1.0.0
+
+    The edge speaks the **real OpenAI `/v1/chat/completions` wire format**
+    (ADR-0012, v1 subset) so unmodified OpenAI SDKs and `curl` examples work
+    against sluice as a drop-in. The request schema is **liberal-accept**
+    (`additionalProperties: true`): unknown OpenAI fields (`seed`, `user`,
+    `presence_penalty`, `frequency_penalty`, `logit_bias`, `response_format`,
+    `n`, `logprobs`, …) are accepted and silently ignored, never `400`.
+  version: 2.0.0
 
 servers:
   - url: /
@@ -55,6 +62,8 @@ paths:
                 description: Server-Sent Events stream of completion deltas (CARD-004).
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '429':
@@ -120,7 +129,13 @@ components:
   schemas:
     Message:
       type: object
-      description: One chat message. Aligned with the canonical provider.Message.
+      description: |
+        One OpenAI chat message. `content` is a plain string (the v1 subset);
+        multimodal/array content is a documented non-goal (ADR-0012, CON-008)
+        and is rejected with an OpenAI-shaped 400 by the handler.
+        `additionalProperties: true` so SDK-supplied extras (e.g. `name`) are
+        accepted and ignored, never a 400 (liberal-accept).
+      additionalProperties: true
       required:
         - role
         - content
@@ -139,8 +154,11 @@ components:
     ChatCompletionRequest:
       type: object
       description: |
-        A chat completion request. Aligned with the canonical provider.Request
-        shape (mapped via the ACL in CARD-003).
+        A real OpenAI `/v1/chat/completions` request (ADR-0012 v1 subset). Only
+        `model`, `messages`, `stream`, `temperature`, `top_p`, `max_tokens` and
+        `stop` are modeled and forwarded upstream; every other field is
+        accepted-but-ignored via `additionalProperties: true` (liberal-accept).
+      additionalProperties: true
       required:
         - model
         - messages
@@ -157,7 +175,7 @@ components:
           type: boolean
           description: |
             When true, the gateway responds with a `text/event-stream` (SSE)
-            body instead of a JSON response (CARD-004).
+            body of `chat.completion.chunk` events terminated by `data: [DONE]`.
           default: false
         max_tokens:
           type: integer
@@ -165,12 +183,20 @@ components:
         temperature:
           type: number
           description: Optional sampling temperature.
+        top_p:
+          type: number
+          description: Optional nucleus-sampling probability mass.
+        stop:
+          type: array
+          description: Optional stop sequences that end generation.
+          items:
+            type: string
 
     Usage:
       type: object
       description: |
-        Token accounting for a completion. Aligned with the canonical
-        provider.Usage.
+        Token accounting for a completion (OpenAI shape). Aligned with the
+        canonical provider.Usage.
       required:
         - prompt_tokens
         - completion_tokens
@@ -183,25 +209,70 @@ components:
         total_tokens:
           type: integer
 
-    ChatCompletionResponse:
+    ResponseMessage:
       type: object
-      description: |
-        A chat completion result. Aligned with the canonical provider.Response.
+      description: The assistant message inside a chat.completion choice.
       required:
-        - model
+        - role
         - content
-        - finish_reason
-        - usage
       properties:
-        model:
+        role:
           type: string
-          description: The model that produced the completion.
+          description: Always "assistant" for a completion choice.
         content:
           type: string
           description: The assistant completion text.
+
+    Choice:
+      type: object
+      description: One chat.completion choice. The gateway always returns exactly one (index 0).
+      required:
+        - index
+        - message
+        - finish_reason
+      properties:
+        index:
+          type: integer
+          description: The choice index (always 0 — n>1 is a non-goal, CON-008).
+        message:
+          $ref: '#/components/schemas/ResponseMessage'
         finish_reason:
           type: string
-          description: The canonical reason the completion ended (e.g. "stop", "length").
+          nullable: true
+          description: The reason the completion ended (e.g. "stop", "length").
+
+    ChatCompletionResponse:
+      type: object
+      description: |
+        A real OpenAI `chat.completion` object (ADR-0012). `id`, `object` and
+        `created` are generated at the edge (not passed through from upstream);
+        `system_fingerprint` is omitted.
+      required:
+        - id
+        - object
+        - created
+        - model
+        - choices
+        - usage
+      properties:
+        id:
+          type: string
+          description: An edge-generated completion id, prefixed "chatcmpl-".
+        object:
+          type: string
+          description: Always "chat.completion".
+        created:
+          type: integer
+          format: int64
+          description: Unix timestamp (seconds) when the gateway built the response.
+        model:
+          type: string
+          description: The model that produced the completion.
+        choices:
+          type: array
+          description: The completion choices (always exactly one — index 0).
+          items:
+            $ref: '#/components/schemas/Choice'
         usage:
           $ref: '#/components/schemas/Usage'
 
@@ -231,23 +302,49 @@ components:
           additionalProperties:
             type: string
 
-    Error:
+    ErrorDetail:
       type: object
-      description: A structured JSON error body.
+      description: The OpenAI error object carried inside an Error envelope.
       required:
-        - error
         - message
+        - type
       properties:
-        error:
-          type: string
-          description: A short, machine-readable error code.
         message:
           type: string
           description: A human-readable description of the error.
+        type:
+          type: string
+          description: The OpenAI error type (e.g. "invalid_request_error", "server_error").
+        code:
+          type: string
+          nullable: true
+          description: A short, machine-readable error code (may be null).
+        param:
+          type: string
+          nullable: true
+          description: The request parameter the error relates to, when applicable (may be null).
+
+    Error:
+      type: object
+      description: |
+        The OpenAI error envelope `{ "error": { message, type, code } }` so
+        unmodified OpenAI SDKs parse gateway and mapped-upstream errors
+        (ADR-0012, FR-020).
+      required:
+        - error
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorDetail'
 
   responses:
     BadRequest:
       description: The request was malformed or failed validation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: The request was not authorized.
       content:
         application/json:
           schema:

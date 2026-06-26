@@ -148,7 +148,8 @@ func (m *RateLimiter) Middleware(next http.Handler) http.Handler {
 			)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"error":"internal_error","message":"failed to assign rate-limit key"}`))
+			// OpenAI error envelope (ADR-0012 §7) so SDKs parse the gateway error.
+			_, _ = w.Write([]byte(`{"error":{"message":"failed to assign rate-limit key","type":"server_error","code":"internal_error"}}`))
 			return
 		}
 
@@ -265,7 +266,8 @@ func (m *RateLimiter) reject(w http.ResponseWriter, r *http.Request, retryAfter 
 	w.Header().Set("Retry-After", strconv.Itoa(secs))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusTooManyRequests)
-	_, _ = w.Write([]byte(`{"error":"rate_limited","message":"rate limit exceeded; retry later"}`))
+	// OpenAI error envelope (ADR-0012 §7, AC-060) so OpenAI SDKs parse the 429.
+	_, _ = w.Write([]byte(`{"error":{"message":"rate limit exceeded; retry later","type":"rate_limit_error","code":"rate_limited"}}`))
 
 	m.logger.LogAttrs(r.Context(), slog.LevelInfo, "request rate-limited",
 		slog.String("tier", tier),
