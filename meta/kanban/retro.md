@@ -151,3 +151,39 @@ _Final wave: the production-readiness harness (single enabler card)._
 - golang-pro: calibrated throughout (no effort adjustment warranted)
 - The severity gate caught a real defect in ~40% of cards (DoS, auth bypass, body corruption, billing data-loss, metric cardinality) — all fixed before merge.
 - Process note: OpenAPI-first pivot mid-build (ADR-0011, +CARD-012) was the one structural change; cheap CARD-003 restart, net quality gain.
+
+---
+
+## Wave 7 — 2026-06-27 — OpenAI compatibility increment
+
+_Post-v1 increment: real drop-in OpenAI compatibility (Ollama primary). Ran the full
+architect(delta)→decompose→implement→review pipeline. (The earlier audit-hardening cards
+CARD-013/014/015 were merged but not separately retro'd.)_
+
+### Cards
+
+| Card | Title | Cat | Est | Actual | Cycles | Score | Signal |
+|------|-------|-----|-----|--------|--------|-------|--------|
+| CARD-016 | OpenAI-compatible upstream provider adapter (Ollama primary) | feature | 2d | 0.1d | 1 | 9.0 | simpler (cycles) |
+| CARD-017 | OpenAI-compatible edge (drop-in for OpenAI SDKs) | feature | 2.5d | 0.1d | 2 | 9.5 | accurate (cycles) |
+
+### Metrics
+
+- cards: 2, escalated: 0, split: 0
+- total_estimate: 4.5d
+- avg_cycles: 1.5 (cycles proxy; accuracy invalid under AI wall-clock)
+- avg_final_score: 9.25, avg_initial_score: 8.5, score_improvement: +0.75 (8.5 → 9.25)
+
+### Calibration signals
+
+- golang-pro (2 cards, avg_cycles 1.5, proxy) → calibrated (no change; within 1.3–2.5 band)
+
+### Quality notes
+
+- CARD-017: the severity gate caught a drop-in-breaking defect — `stop` modeled array-only, so a real OpenAI SDK sending a scalar `"stop":"\n"` would get a 400. Fixed cycle 2 (8.0 → 9.5). The kind of bug that silently breaks "OpenAI-compatible".
+- Architecture was recorded first (ADR-0012 contract, ADR-0013 real upstream) before any code; validators PASS, go generate diff-clean.
+
+### Trend vs Wave 6
+
+- Quality: 9.5 → 9.25 (→ stable, high)
+- Cycles: 2.0 → 1.5 (↑ fewer iterations)
