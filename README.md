@@ -4,9 +4,10 @@
 [![Go 1.25](https://img.shields.io/badge/go-1.25-00ADD8?logo=go&logoColor=white)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**A production-grade LLM gateway in Go** — a single, contract-first HTTP front
-door for chat-completion providers that adds the resilience and observability
-patterns you need before putting an LLM in front of real traffic.
+**A production-grade, OpenAI-compatible LLM gateway in Go** — a single drop-in
+`/v1/chat/completions` front door (point any OpenAI SDK, or a local Ollama, at it)
+that adds the resilience and observability patterns you need before putting an LLM
+in front of real traffic.
 
 > **Performance** (Apple M5 Pro / Go 1.26 — see [`load/RESULTS.md`](load/RESULTS.md) for full method):
 > - **Pure gateway overhead p95 ≈ 11 µs** — 5,000-request in-process measurement against a 0-latency mock; ~1000× under the 20 ms NFR-001 budget.
@@ -225,7 +226,8 @@ Each pattern maps to the package/file that implements it:
 
 | Pattern | Where | Notes |
 |---------|-------|-------|
-| **Rate limiting** | [`internal/ratelimit/`](internal/ratelimit/), [`internal/middleware/ratelimit.go`](internal/middleware/ratelimit.go) | Local token bucket + **distributed** Redis fixed-window (atomic Lua, shared cross-instance cap, AC-013); fails open to local on a Redis blip. |
+| **OpenAI-compatible API + real upstream** | [`internal/server/edge.go`](internal/server/edge.go), [`internal/provider/httpprovider.go`](internal/provider/httpprovider.go) | Drop-in `/v1/chat/completions` (liberal-accept request, `chat.completion`/`chat.completion.chunk` responses, OpenAI error envelope, edge-generated `id`); the upstream adapter speaks the same wire to Ollama / OpenAI / vLLM (ADR-0012/0013). |
+| **Rate limiting** | [`internal/ratelimit/`](internal/ratelimit/), [`internal/middleware/ratelimit.go`](internal/middleware/ratelimit.go) | Local token bucket + **distributed** Redis token-bucket (atomic Lua, shared cross-instance cap, AC-013); fails open to local on a Redis blip. |
 | **Ephemeral API keys** | [`internal/middleware/ratelimit.go`](internal/middleware/ratelimit.go) | A keyless caller is minted a crypto-random key (returned via `X-Sluice-Api-Key` + cookie) and gets its own rate-limit bucket — no noisy-neighbour, no auth backend required (ADR-0001). |
 | **Retries (exponential backoff + jitter)** | [`internal/proxy/retry/`](internal/proxy/retry/) | Bounded attempts; treats an open breaker as non-retryable. |
 | **Circuit breaker** | [`internal/breaker/`](internal/breaker/), [`internal/proxy/resilience/`](internal/proxy/resilience/) | Per-provider `gobreaker`; open → fast-fail 503 + Retry-After. |
@@ -234,7 +236,7 @@ Each pattern maps to the package/file that implements it:
 | **Async metering** | [`internal/metering/`](internal/metering/) | Non-blocking enqueue (drop-on-full) → bounded buffer → batch pgx INSERT into `usage_events`; the hot path never blocks on Postgres. |
 | **Graceful shutdown** | [`internal/lifecycle/`](internal/lifecycle/) | Drains in-flight requests, then runs shutdown hooks (flush the metering buffer) under their own deadlines. |
 | **Panic recovery** | [`internal/middleware/recover.go`](internal/middleware/recover.go) | Outermost middleware: a handler panic → 500, process survives. |
-| **Metrics + tracing** | [`internal/metrics/`](internal/metrics/), [`internal/tracing/`](internal/tracing/), [`internal/middleware/tracing.go`](internal/middleware/tracing.go) | 7 Prometheus series at `/metrics` (requests, latency, in-flight, provider latency, rate-limit rejections, breaker state, dropped metering events) + OTLP spans. |
+| **Metrics + tracing** | [`internal/metrics/`](internal/metrics/), [`internal/tracing/`](internal/tracing/), [`internal/middleware/tracing.go`](internal/middleware/tracing.go) | 8 Prometheus series at `/metrics` (requests, latency, in-flight, provider latency, rate-limit rejections, breaker state, metering buffer size, dropped metering events) + OTLP spans. |
 
 ---
 
@@ -248,6 +250,11 @@ A few choices that define the repo's character (the full rationale lives in
 - **Contract-first OpenAPI + `oapi-codegen`** (ADR-0011). `api/openapi.yaml` is the single
   source of truth; the typed server boundary is generated onto the plain ServeMux and requests
   are schema-validated at the edge — the discipline of a contract without the weight of a framework.
+- **OpenAI-compatible, end-to-end** (ADR-0012/0013). Both the public edge and the upstream adapter
+  speak the real OpenAI `/v1/chat/completions` wire, so any OpenAI SDK is a drop-in and the same
+  gateway fronts Ollama / OpenAI / vLLM by config. The request is *liberal-accept* — unknown OpenAI
+  fields are ignored, never a 400; only the modeled subset is forwarded, and `id`/`created` are
+  generated at the edge.
 - **Reject-before-work backpressure** (worker pool as a non-blocking semaphore, ADR-0003).
   When the pool is full the request is rejected *immediately* (503 + `Retry-After`) — never queued.
   A queue would mask overload and grow goroutines without bound; immediate shedding keeps latency
@@ -268,17 +275,19 @@ A few choices that define the repo's character (the full rationale lives in
 This is a focused reference build; the honest gaps a real deployment would close (most are scored in
 [`meta/kanban/backlog.md`](meta/kanban/backlog.md)):
 
-- **Real provider adapters** (OpenAI / Anthropic) behind the existing `Provider` interface — v1 ships
-  a controllable *mock* upstream (over real HTTP, so connection pooling and cancellation are genuinely
-  exercised), which keeps load tests reproducible.
-- **Real authentication** — v1 treats the API key as an identifier only (no validation backend), plus a
-  per-source-IP cap on ephemeral-key issuance to close the rate-limit bypass.
+- **Provider breadth & routing** — sluice already proxies any **OpenAI-compatible** backend
+  (Ollama, OpenAI, vLLM, LM Studio) via the real upstream adapter; a real deployment would add native
+  adapters for non-OpenAI wires (e.g. Anthropic's native API) behind the same `Provider` interface,
+  plus **multi-provider routing by model** (today: a single configured upstream). The default `make up`
+  upstream is a controllable in-process mock so the demo stays fast and load tests stay reproducible.
 - **Fallback-provider routing** on an open breaker (multi-provider failover) — today a tripped breaker
   fast-fails; with multiple providers it would reroute.
+- **Real authentication** — v1 treats the API key as an identifier only (no validation backend), plus a
+  per-source-IP cap on ephemeral-key issuance to close the rate-limit bypass.
 - **Billing-grade metering durability** — a WAL / Kafka in front of Postgres so usage is never dropped
   under overload (v1 is best-effort drop-on-full).
-- **Sliding-window distributed rate limiting** (v1's Redis tier is a fixed window), multi-region
-  deployment, and persistent configuration for routes / per-key limits.
+- **Multi-region deployment and persistent configuration** for routes / per-key limits (today limits are
+  env-configured; the distributed rate-limit tier is already a Redis token bucket).
 
 ---
 
