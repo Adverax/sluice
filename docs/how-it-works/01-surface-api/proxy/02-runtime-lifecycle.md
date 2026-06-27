@@ -151,7 +151,9 @@ clean drain), which `main` maps to exit code 0.
 `Recoverer` (`internal/middleware/recover.go`) is the **outermost** middleware in
 the chain (see `01-inference-proxying.md` §2). A deferred `recover()` catches any
 panic from a downstream handler, logs it at ERROR with the panic value and a full
-stack trace, and writes a 500 — the process keeps serving:
+stack trace, and writes a 500 — now as the **OpenAI error envelope** (ADR-0012 §7)
+so unmodified OpenAI SDKs parse the recovered 500 just like any other gateway
+error — and the process keeps serving:
 
 ```go
 defer func() {
@@ -165,11 +167,18 @@ defer func() {
         )
         w.Header().Set("Content-Type", "application/json")
         w.WriteHeader(http.StatusInternalServerError)
-        _, _ = w.Write([]byte(`{"error":"internal_error","message":"internal server error"}`))
+        // OpenAI error envelope (ADR-0012 §7) for SDK-parsable 500s.
+        _, _ = w.Write([]byte(`{"error":{"message":"internal server error","type":"server_error","code":"internal_error"}}`))
     }
 }()
 next.ServeHTTP(w, r)
 ```
+
+The 500 body now mirrors the same `{error:{message,type,code}}` shape the edge
+emits for 400/404/502/503 (`01-inference-proxying.md` §8), with
+`type: "server_error"` and `code: "internal_error"`. This is the only
+OpenAI-increment change to the lifecycle aspect; the drain/flush narrative below is
+unchanged.
 
 Two behaviours are load-bearing (see
 [diagrams/02-runtime-lifecycle-02.puml](diagrams/02-runtime-lifecycle-02.puml)):

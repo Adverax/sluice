@@ -1,8 +1,9 @@
 # surface-api — what the gateway exposes
 
-The HTTP surface clients interact with, and the request hot path behind it. This group
-covers how an inference request is accepted, routed, proxied (JSON or SSE stream), cached,
-and cancelled — plus the process lifecycle that keeps the surface stable.
+The **OpenAI-compatible** HTTP surface clients interact with, and the request hot path behind
+it. This group covers how a drop-in `/v1/chat/completions` request is accepted (liberal-accept),
+mapped to the canonical model, routed, proxied (`chat.completion` JSON or `chat.completion.chunk`
+SSE), cached, and cancelled — plus the process lifecycle that keeps the surface stable.
 
 | Aspect | Topics |
 |--------|--------|

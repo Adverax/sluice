@@ -6,10 +6,12 @@ mechanism, not just the API.
 
 sluice is a **single Go service** (CON-003 — logical bounded contexts, not microservices)
 that sits in front of LLM providers and adds the resilience and observability a gateway
-needs before it carries real traffic. Every request enters through one HTTP front door
-(`POST /v1/chat/completions`), is routed to a provider by its `model`, and is protected
-on the way out by rate limiting, a bounded worker pool, retries, and a circuit breaker —
-while usage is metered asynchronously and the whole path is instrumented.
+needs before it carries real traffic. It is **OpenAI-compatible end-to-end** (ADR-0012/0013):
+a request enters through one drop-in `POST /v1/chat/completions` front door (any OpenAI SDK
+works unmodified), is routed to a provider by its `model`, and is protected on the way out by
+rate limiting, a bounded worker pool, retries, and a circuit breaker before the
+OpenAI-compatible upstream adapter forwards it (Ollama / OpenAI / vLLM by config; an in-process
+mock by default) — while usage is metered asynchronously and the whole path is instrumented.
 
 > These docs are **generated from ground truth** — the domain model (`meta/architecture/`)
 > and the **real source code**. Each aspect's `README.md` carries a **doc→code map** so the

@@ -21,7 +21,7 @@ state Recovering {
 
 Reraised --> [*] : panic(rv) — net/http handles abort\n(no 500 written, connection aborted)
 
-Logged --> Wrote500 : logging.LogPanic (ERROR + stack)\nthen WriteHeader(500) best-effort
+Logged --> Wrote500 : logging.LogPanic (ERROR + stack)\nthen WriteHeader(500) + OpenAI error envelope\n{error:{message,type:server_error,code:internal_error}}\nbest-effort
 Wrote500 --> [*] : process SURVIVES; net/http keeps serving
 
 Completed --> [*]

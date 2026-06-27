@@ -1,58 +1,73 @@
 @startuml
 ' ============================================================================
 ' sluice - Proxy (CTX-001) / CAP-001 Inference proxying
-' The request hot path for POST /v1/chat/completions.
+' The request hot path for the REAL OpenAI POST /v1/chat/completions (non-streaming).
 ' Derived from real code:
-'   cmd/gateway/main.go            (middleware composition order)
-'   internal/middleware/cache.go   (cache lookup/store, streaming bypass)
-'   internal/server/server.go      (CreateChatCompletion, streamResponse)
-'   internal/proxy/router.go       (model -> provider)
-'   internal/proxy/resilience/*    (retry -> breaker seam, InferFunc/StreamFunc)
-'   internal/provider/httpprovider.go (HTTP adapter, ctx cancellation)
+'   cmd/gateway/main.go               (middleware composition order, wiring)
+'   internal/middleware/cache.go      (cache lookup/store, streaming bypass)
+'   internal/server/server.go         (CreateChatCompletion, validator OnErr)
+'   internal/server/edge.go           (OpenAI DTO <-> canonical mapping, envelope)
+'   internal/proxy/router.go          (model -> provider)
+'   internal/proxy/resilience/*       (retry -> breaker seam, InferFunc)
+'   internal/provider/httpprovider.go (real OpenAI upstream adapter, ctx cancel)
 ' ============================================================================
-title "CAP-001: POST /v1/chat/completions hot path (non-streaming)"
+title "CAP-001: OpenAI POST /v1/chat/completions hot path (non-streaming)"
 
-actor "API Client" as client
+actor "OpenAI SDK / curl" as client
 participant "Middleware chain\n(recover->logging->tracing->\nmetrics->rate-limit->counting->cache)" as chain
 participant "Cache MW\n(internal/middleware/cache.go)" as cache
 participant "Server.CreateChatCompletion\n(internal/server/server.go)" as handler
+participant "OpenAI edge\n(internal/server/edge.go)" as edge
 participant "Router\n(internal/proxy/router.go)" as router
 participant "InferFunc seam\npool->retry->breaker\n(resilience.Composer)" as seam
-participant "Provider (HTTP adapter)\n(internal/provider/httpprovider.go)" as provider
-participant "LLM upstream (mock)\nEXT-001" as upstream
+participant "OpenAI upstream adapter\n(internal/provider/httpprovider.go)" as provider
+participant "OpenAI-compatible upstream\n(mock default / Ollama / OpenAI)\nEXT-001" as upstream
 participant "Metering Sink\n(buffered channel)" as meter
 
-client -> chain : HTTP POST (JSON)
-chain -> cache : (innermost) key = sha256(method|path|body)
+client -> chain : POST /v1/chat/completions\n(OpenAI ChatCompletionRequest JSON)
+note over chain
+OpenAPI request validator (built in Server.Handler):
+schema-invalid body (bad enum role, array content) ->
+400 OpenAI envelope via OnErr, BEFORE the handler.
+additionalProperties:true -> unknown fields pass.
+end note
+chain -> cache : (innermost) key = sha256(method|path|raw body)
 alt cache HIT (non-streaming)
-  cache -> client : 200 + X-Cache: HIT (stored body)
+  cache -> client : 200 + X-Cache: HIT (stored chat.completion JSON)
 else cache MISS / streaming bypass
   cache -> handler : X-Cache: MISS, body restored
   handler -> handler : validate model / messages\n(400 missing_model, 400 empty_messages)
-  handler -> router : Provider(body.Model)
-  alt model not registered
-    router -> client : 404 unknown_model
-  else resolved
-    router -> handler : provider.Provider
-    handler -> handler : toCanonicalRequest(body) (ADR-0009 ACL)
-    handler -> seam : infer(ctx, prov, req)
-    seam -> seam : retry.Do( breaker.Execute( call ) )
-    seam -> provider : p.Infer(ctx, req)
-    provider -> upstream : POST /v1/chat/completions\n(http.NewRequestWithContext)
-    alt success
-      upstream -> provider : 200 JSON
-      provider -> seam : canonical Response
-      seam -> handler : Response
-      handler -> meter : Enqueue(UsageEvent) (non-blocking)
-      handler -> cache : 200 JSON body (recorded)
-      cache -> cache : SETEX key, ttl (5m default / X-Cache-TTL)
-      cache -> client : 200 + X-Cache: MISS
-    else open breaker / deadline
-      seam -> handler : *Unavailable (errors.Is ErrServiceUnavailable)
-      handler -> client : 503 + Retry-After
-    else provider 5xx / retries exhausted / 4xx
-      seam -> handler : error
-      handler -> client : 502 provider_error
+  handler -> edge : toCanonicalRequest(body)
+  alt n > 1 (liberal-accept additional prop)
+    edge -> client : 400 invalid_request_error / unsupported_value\n(NO provider contacted)
+  else mapped (only model/messages/stream/temp/top_p/max_tokens/stop;\nstop normalized scalar|array; unknown ignored)
+    edge -> handler : provider.Request (canonical, ADR-0009)
+    handler -> router : Provider(body.Model)
+    alt model not registered
+      router -> client : 404 invalid_request_error / model_not_found
+    else resolved
+      router -> handler : provider.Provider
+      handler -> seam : infer(ctx, prov, req)
+      seam -> seam : retry.Do( breaker.Execute( call ) )
+      seam -> provider : p.Infer(ctx, req)
+      provider -> upstream : POST <baseURL>/chat/completions\n(real OpenAI oaiRequest;\nBearer only if key set;\nhttp.NewRequestWithContext)
+      alt success
+        upstream -> provider : 200 OpenAI chat.completion JSON
+        provider -> seam : canonical Response (choices[0]+usage)
+        seam -> handler : Response
+        handler -> meter : Enqueue(UsageEvent) (non-blocking)
+        handler -> edge : toUnaryResponse(resp)
+        edge -> handler : OpenAI chat.completion\n(edge-generated id "chatcmpl-",\ncreated, object; single choice)
+        handler -> cache : 200 chat.completion body (recorded)
+        cache -> cache : SETEX key, ttl (5m default / X-Cache-TTL)
+        cache -> client : 200 + X-Cache: MISS
+      else open breaker / deadline / pool saturated
+        seam -> handler : *Unavailable (errors.Is ErrServiceUnavailable)
+        handler -> client : 503 + Retry-After\n(OpenAI service_unavailable envelope)
+      else provider 5xx / retries exhausted / 4xx StatusError
+        seam -> handler : error
+        handler -> client : 502 OpenAI upstream_error envelope
+      end
     end
   end
 end
@@ -60,6 +75,6 @@ end
 note over client, provider
 Client disconnect cancels ctx (FR-003, INV-002):
 http.NewRequestWithContext threads ctx into p.client.Do,
-so a cancelled ctx aborts the in-flight upstream call.
+so a cancelled ctx aborts the in-flight REAL upstream call.
 end note
 @enduml
